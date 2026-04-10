@@ -1,0 +1,439 @@
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import type Database from "better-sqlite3";
+import { getDb } from "./connection";
+import { config } from "../utils/config";
+import { createLogger } from "../utils/logger";
+
+const log = createLogger("SupabaseSync");
+
+const BATCH_SIZE = 500;
+const UPDATE_WINDOW_MS = 3_600_000;
+
+interface SyncStateEntry {
+    lastId: number;
+    lastAt: number;
+}
+
+function getSyncState(db: Database.Database, tableName: string): SyncStateEntry {
+    const row = db
+        .prepare("SELECT last_synced_id, last_synced_at FROM sync_state WHERE table_name = ?")
+        .get(tableName) as { last_synced_id: number; last_synced_at: number } | undefined;
+    return {
+        lastId: row?.last_synced_id ?? 0,
+        lastAt: row?.last_synced_at ?? 0,
+    };
+}
+
+function setSyncState(
+    db: Database.Database,
+    tableName: string,
+    lastId: number,
+    lastAt: number = Date.now()
+): void {
+    db.prepare(
+        `INSERT INTO sync_state (table_name, last_synced_id, last_synced_at) VALUES (?, ?, ?)
+         ON CONFLICT(table_name) DO UPDATE SET
+             last_synced_id  = excluded.last_synced_id,
+             last_synced_at  = excluded.last_synced_at`
+    ).run(tableName, lastId, lastAt);
+}
+
+async function upsertBatched(
+    supabase: SupabaseClient,
+    table: string,
+    rows: any[],
+    onConflict: string
+): Promise<void> {
+    if (!rows.length) return;
+    for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+        const batch = rows.slice(i, i + BATCH_SIZE);
+        const { error } = await supabase.from(table).upsert(batch, { onConflict });
+        if (error) throw new Error(`Supabase upsert error on "${table}": ${error.message}`);
+    }
+}
+
+export class SupabaseSyncEngine {
+    private readonly supabase: SupabaseClient;
+    private intervalHandle: NodeJS.Timeout | null = null;
+    private syncing = false;
+    readonly enabled: boolean;
+
+    constructor() {
+        // cloud and local+cloud both need Supabase credentials
+        const hasCredentials = !!(config.supabaseUrl && config.supabaseServiceKey);
+        const modeNeedsSync  = config.dbMode === "local+cloud" || config.dbMode === "cloud";
+        this.enabled = hasCredentials && modeNeedsSync;
+    
+        if (this.enabled) {
+            this.supabase = createClient(config.supabaseUrl, config.supabaseServiceKey, {
+                auth: { persistSession: false, autoRefreshToken: false },
+            });
+            log.info(`Supabase sync enabled (DB_MODE=${config.dbMode}, interval=${config.supabaseSyncIntervalMs}ms)`);
+        } else {
+            this.supabase = null as unknown as SupabaseClient;
+            if (config.dbMode !== "local") {
+                log.warn(
+                    `DB_MODE="${config.dbMode}" but Supabase credentials are missing — ` +
+                    `falling back to local-only.`
+                );
+            }
+        }
+    }
+
+    async testConnection(): Promise<boolean> {
+        if (!this.enabled) return false;
+        try {
+            const { error } = await this.supabase
+                .from("targets")
+                .select("user_id")
+                .limit(1);
+            if (error) {
+                log.error(`Supabase connection test failed: ${error.message}`);
+                log.error(
+                    "Hint: have you run supabase-schema.sql in your Supabase project? " +
+                    "See docs/SUPABASE_SETUP.md."
+                );
+                return false;
+            }
+            log.info("Supabase connection OK");
+            return true;
+        } catch (err: any) {
+            log.error(`Supabase connection test threw: ${err.message}`);
+            return false;
+        }
+    }
+
+    start(): void {
+        if (!this.enabled) return;
+        log.info(`Supabase sync will run every ${config.supabaseSyncIntervalMs / 1000}s`);
+
+        const initial = setTimeout(() => {
+            this.runSync();
+            this.intervalHandle = setInterval(
+                () => this.runSync(),
+                config.supabaseSyncIntervalMs
+            );
+        }, 60_000);
+
+        if ((initial as any).unref) (initial as any).unref();
+    }
+
+    stop(): void {
+        if (this.intervalHandle) {
+            clearInterval(this.intervalHandle);
+            this.intervalHandle = null;
+        }
+        log.info("Supabase sync stopped");
+    }
+
+    async forceSync(): Promise<void> {
+        if (!this.enabled) return;
+        await this.runSync();
+    }
+
+    private async runSync(): Promise<void> {
+        if (this.syncing) {
+            log.debug("Sync already in progress — skipping this tick");
+            return;
+        }
+        this.syncing = true;
+        const started = Date.now();
+        log.info("Supabase sync cycle starting");
+
+        try {
+            const db = getDb();
+            const windowStart = Date.now() - UPDATE_WINDOW_MS;
+
+            await this.syncTargets(db);
+            await this.syncAlertRules(db);
+            await this.syncEvents(db);
+            await this.syncProfileSnapshots(db, windowStart);
+            await this.syncPresenceSessions(db, windowStart);
+            await this.syncActivitySessions(db, windowStart);
+            await this.syncVoiceSessions(db, windowStart);
+            await this.syncMessages(db);
+            await this.syncTypingEvents(db, windowStart);
+            await this.syncReactions(db, windowStart);
+            await this.syncGuildMemberEvents(db);
+            await this.syncAlertHistory(db, windowStart);
+            await this.syncDailySummaries(db);
+
+            log.info(`Supabase sync cycle completed in ${Date.now() - started}ms`);
+        } catch (err: any) {
+            log.error(`Supabase sync cycle failed: ${err.message}`);
+        } finally {
+            this.syncing = false;
+        }
+    }
+
+    private async syncTargets(db: Database.Database): Promise<void> {
+        const rows = db.prepare("SELECT * FROM targets").all();
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "targets", rows, "user_id");
+        log.debug(`targets: synced ${rows.length} rows`);
+    }
+
+    private async syncAlertRules(db: Database.Database): Promise<void> {
+        const rows = db.prepare("SELECT * FROM alert_rules").all();
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "alert_rules", rows, "id");
+        log.debug(`alert_rules: synced ${rows.length} rows`);
+    }
+
+    private async syncEvents(db: Database.Database): Promise<void> {
+        const state = getSyncState(db, "events");
+        let currentId = state.lastId;
+        let totalSynced = 0;
+
+        const maxBatches = currentId === 0 ? 10 : 3;
+
+        for (let b = 0; b < maxBatches; b++) {
+            const rows = db
+                .prepare("SELECT * FROM events WHERE id > ? ORDER BY id LIMIT ?")
+                .all(currentId, BATCH_SIZE) as any[];
+
+            if (!rows.length) break;
+            await upsertBatched(this.supabase, "events", rows, "id");
+            currentId = Math.max(...rows.map((r) => r.id));
+            totalSynced += rows.length;
+            if (rows.length < BATCH_SIZE) break;
+        }
+
+        if (totalSynced > 0) {
+            setSyncState(db, "events", currentId);
+            log.debug(`events: synced ${totalSynced} rows (last id: ${currentId})`);
+        }
+    }
+
+    private async syncProfileSnapshots(
+        db: Database.Database,
+        windowStart: number
+    ): Promise<void> {
+        const { lastId } = getSyncState(db, "profile_snapshots");
+        const rows = db
+            .prepare(
+                `SELECT * FROM profile_snapshots
+                 WHERE id > ?
+                    OR (id <= ? AND timestamp >= ?)
+                 ORDER BY id LIMIT ?`
+            )
+            .all(lastId, lastId, windowStart, BATCH_SIZE * 5) as any[];
+
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "profile_snapshots", rows, "id");
+        const newer = rows.filter((r) => r.id > lastId);
+        if (newer.length) {
+            setSyncState(db, "profile_snapshots", Math.max(...newer.map((r) => r.id)));
+        }
+        log.debug(`profile_snapshots: synced ${rows.length} rows`);
+    }
+
+    private async syncPresenceSessions(
+        db: Database.Database,
+        windowStart: number
+    ): Promise<void> {
+        const { lastId } = getSyncState(db, "presence_sessions");
+        const rows = db
+            .prepare(
+                `SELECT * FROM presence_sessions
+                 WHERE id > ?
+                    OR (id <= ? AND start_time >= ?)
+                 ORDER BY id LIMIT ?`
+            )
+            .all(lastId, lastId, windowStart, BATCH_SIZE * 5) as any[];
+
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "presence_sessions", rows, "id");
+        const newer = rows.filter((r) => r.id > lastId);
+        if (newer.length) {
+            setSyncState(db, "presence_sessions", Math.max(...newer.map((r) => r.id)));
+        }
+        log.debug(`presence_sessions: synced ${rows.length} rows`);
+    }
+
+    private async syncActivitySessions(
+        db: Database.Database,
+        windowStart: number
+    ): Promise<void> {
+        const { lastId } = getSyncState(db, "activity_sessions");
+        const rows = db
+            .prepare(
+                `SELECT * FROM activity_sessions
+                 WHERE id > ?
+                    OR (id <= ? AND start_time >= ?)
+                 ORDER BY id LIMIT ?`
+            )
+            .all(lastId, lastId, windowStart, BATCH_SIZE * 5) as any[];
+
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "activity_sessions", rows, "id");
+        const newer = rows.filter((r) => r.id > lastId);
+        if (newer.length) {
+            setSyncState(db, "activity_sessions", Math.max(...newer.map((r) => r.id)));
+        }
+        log.debug(`activity_sessions: synced ${rows.length} rows`);
+    }
+
+    private async syncVoiceSessions(
+        db: Database.Database,
+        windowStart: number
+    ): Promise<void> {
+        const { lastId } = getSyncState(db, "voice_sessions");
+        const rows = db
+            .prepare(
+                `SELECT * FROM voice_sessions
+                 WHERE id > ?
+                    OR (id <= ? AND start_time >= ?)
+                 ORDER BY id LIMIT ?`
+            )
+            .all(lastId, lastId, windowStart, BATCH_SIZE * 5) as any[];
+
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "voice_sessions", rows, "id");
+        const newer = rows.filter((r) => r.id > lastId);
+        if (newer.length) {
+            setSyncState(db, "voice_sessions", Math.max(...newer.map((r) => r.id)));
+        }
+        log.debug(`voice_sessions: synced ${rows.length} rows`);
+    }
+
+    private async syncMessages(db: Database.Database): Promise<void> {
+        const state = getSyncState(db, "messages");
+        const since =
+            state.lastAt > 0 ? Math.max(0, state.lastAt - UPDATE_WINDOW_MS) : 0;
+
+        let offset = 0;
+        let totalSynced = 0;
+        const maxBatches = since === 0 ? 10 : 5;
+
+        for (let b = 0; b < maxBatches; b++) {
+            const rows = db
+                .prepare(
+                    `SELECT * FROM messages
+                     WHERE created_at >= ?
+                        OR (edited_at  IS NOT NULL AND edited_at  >= ?)
+                        OR (deleted_at IS NOT NULL AND deleted_at >= ?)
+                     ORDER BY created_at
+                     LIMIT ? OFFSET ?`
+                )
+                .all(since, since, since, BATCH_SIZE, offset) as any[];
+
+            if (!rows.length) break;
+            await upsertBatched(this.supabase, "messages", rows, "message_id");
+            totalSynced += rows.length;
+            offset += rows.length;
+            if (rows.length < BATCH_SIZE) break;
+        }
+
+        setSyncState(db, "messages", 0, Date.now());
+        if (totalSynced) log.debug(`messages: synced ${totalSynced} rows`);
+    }
+
+    private async syncTypingEvents(
+        db: Database.Database,
+        windowStart: number
+    ): Promise<void> {
+        const { lastId } = getSyncState(db, "typing_events");
+        const rows = db
+            .prepare(
+                `SELECT * FROM typing_events
+                 WHERE id > ?
+                    OR (id <= ? AND timestamp >= ?)
+                 ORDER BY id LIMIT ?`
+            )
+            .all(lastId, lastId, windowStart, BATCH_SIZE * 5) as any[];
+
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "typing_events", rows, "id");
+        const newer = rows.filter((r) => r.id > lastId);
+        if (newer.length) {
+            setSyncState(db, "typing_events", Math.max(...newer.map((r) => r.id)));
+        }
+        log.debug(`typing_events: synced ${rows.length} rows`);
+    }
+
+    private async syncReactions(
+        db: Database.Database,
+        windowStart: number
+    ): Promise<void> {
+        const { lastId } = getSyncState(db, "reactions");
+        const rows = db
+            .prepare(
+                `SELECT * FROM reactions
+                 WHERE id > ?
+                    OR (id <= ? AND added_at >= ?)
+                 ORDER BY id LIMIT ?`
+            )
+            .all(lastId, lastId, windowStart, BATCH_SIZE * 5) as any[];
+
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "reactions", rows, "id");
+        const newer = rows.filter((r) => r.id > lastId);
+        if (newer.length) {
+            setSyncState(db, "reactions", Math.max(...newer.map((r) => r.id)));
+        }
+        log.debug(`reactions: synced ${rows.length} rows`);
+    }
+
+    private async syncGuildMemberEvents(db: Database.Database): Promise<void> {
+        const { lastId } = getSyncState(db, "guild_member_events");
+        const rows = db
+            .prepare(
+                "SELECT * FROM guild_member_events WHERE id > ? ORDER BY id LIMIT ?"
+            )
+            .all(lastId, BATCH_SIZE * 5) as any[];
+
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "guild_member_events", rows, "id");
+        setSyncState(db, "guild_member_events", Math.max(...rows.map((r) => r.id)));
+        log.debug(`guild_member_events: synced ${rows.length} rows`);
+    }
+
+    private async syncAlertHistory(
+        db: Database.Database,
+        windowStart: number
+    ): Promise<void> {
+        const { lastId } = getSyncState(db, "alert_history");
+        const rows = db
+            .prepare(
+                `SELECT * FROM alert_history
+                 WHERE id > ?
+                    OR (id <= ? AND timestamp >= ?)
+                 ORDER BY id LIMIT ?`
+            )
+            .all(lastId, lastId, windowStart, BATCH_SIZE * 5) as any[];
+
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "alert_history", rows, "id");
+        const newer = rows.filter((r) => r.id > lastId);
+        if (newer.length) {
+            setSyncState(db, "alert_history", Math.max(...newer.map((r) => r.id)));
+        }
+        log.debug(`alert_history: synced ${rows.length} rows`);
+    }
+
+    private async syncDailySummaries(db: Database.Database): Promise<void> {
+        const sevenDaysAgo = new Date(Date.now() - 7 * 86_400_000)
+            .toISOString()
+            .split("T")[0];
+        const rows = db
+            .prepare("SELECT * FROM daily_summaries WHERE date >= ? ORDER BY date")
+            .all(sevenDaysAgo) as any[];
+    
+        if (!rows.length) return;
+        // Upsert on primary key — avoids the "duplicate key on daily_summaries_pkey" error
+        await upsertBatched(this.supabase, "daily_summaries", rows, "id");
+        log.debug(`daily_summaries: synced ${rows.length} rows`);
+    }
+}
+
+let _engine: SupabaseSyncEngine | null = null;
+
+export function initSupabaseSync(): SupabaseSyncEngine {
+    _engine = new SupabaseSyncEngine();
+    return _engine;
+}
+
+export function getSupabaseSyncEngine(): SupabaseSyncEngine | null {
+    return _engine;
+}
