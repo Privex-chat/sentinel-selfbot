@@ -46,6 +46,16 @@ Full setup guide: [docs/selfbot.md](https://github.com/Privex-chat/sentinel/blob
 
 ---
 
+## Deploy on Railway (One‑click)
+
+Deploy the selfbot to Railway’s cloud platform with automatic SSL, auto‑restarts, and Supabase cloud database support.
+
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.com/deploy/sentinel-selfbot?referralCode=zpvHsG&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
+> **Note:** Railway deployment requires a Supabase project for persistent storage (ephemeral filesystem). The template includes full instructions for setting up Supabase and environment variables.
+
+---
+
 ## Configuration
 
 | Variable | Required | Default | Description |
@@ -86,7 +96,7 @@ curl -X POST \
 |----------|-------|
 | Local / VPS | Run with `npm start` or use PM2 for persistence |
 | Docker | `Dockerfile` included |
-| Railway | `railway.toml` included. Use `DB_MODE=cloud` with Supabase |
+| **Railway** | **One‑click deploy** – [![Deploy on Railway](https://railway.app/button.svg)](https://railway.com/deploy/sentinel-selfbot?referralCode=zpvHsG&utm_medium=integration&utm_source=template&utm_campaign=generic) |
 | Fly.io | `fly.toml` included. Use `DB_MODE=cloud` with Supabase |
 
 ---
