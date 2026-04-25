@@ -1,6 +1,7 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
 import { analyzeSleepSchedule } from "./sleep-schedule";
+import { computeZScore, isAnomaly } from "./baseline";
 
 const log = createLogger("AnomalyDetector");
 
@@ -23,7 +24,7 @@ export function detectAnomalies(targetId: string, days: number = 7): Anomaly[] {
     const recentEvents = stmts.getEventsFiltered.all(targetId, since, now, 10000, 0) as any[];
     const baselineEvents = stmts.getEventsFiltered.all(targetId, baselineSince, since, 50000, 0) as any[];
 
-    // 1. Unusual online hours
+    // 1. Unusual online hours (sleep schedule)
     const sleep = analyzeSleepSchedule(targetId);
     if (sleep.estimatedBedtime && sleep.estimatedWakeTime) {
         const presenceEvents = recentEvents.filter((e: any) => e.event_type === "PRESENCE_UPDATE");
@@ -36,10 +37,8 @@ export function detectAnomalies(targetId: string, days: number = 7): Anomaly[] {
                     const wakeHour = parseInt(sleep.estimatedWakeTime!.split(":")[0]);
                     let isSleepHour = false;
                     if (bedHour > wakeHour) {
-                        // Overnight sleep (e.g., bed 23:00, wake 08:00)
                         isSleepHour = hour >= bedHour || hour < wakeHour;
                     } else if (bedHour < wakeHour) {
-                        // Daytime sleep (e.g., bed 03:00, wake 11:00)
                         isSleepHour = hour >= bedHour && hour < wakeHour;
                     }
                     if (isSleepHour) {
@@ -55,28 +54,33 @@ export function detectAnomalies(targetId: string, days: number = 7): Anomaly[] {
         }
     }
 
-    // 2. Message volume anomaly
+    // 2. Message volume anomaly — z-score based
     const recentMsgCount = recentEvents.filter((e: any) => e.event_type === "MESSAGE_CREATE").length;
-    const baselineMsgCount = baselineEvents.filter((e: any) => e.event_type === "MESSAGE_CREATE").length;
-    const baselineDays = Math.max((since - baselineSince) / 86400000, 1);
-    const avgDailyMsgs = baselineMsgCount / baselineDays;
     const recentDailyMsgs = recentMsgCount / days;
 
-    if (avgDailyMsgs > 5 && recentDailyMsgs > avgDailyMsgs * 2) {
-        anomalies.push({
-            type: "HIGH_MESSAGE_VOLUME",
-            severity: "low",
-            description: `Messaging ${Math.round(recentDailyMsgs)}x/day vs ${Math.round(avgDailyMsgs)}x/day baseline`,
-            timestamp: now,
-        });
-    }
-    if (avgDailyMsgs > 5 && recentDailyMsgs < avgDailyMsgs * 0.3) {
-        anomalies.push({
-            type: "LOW_MESSAGE_VOLUME",
-            severity: "medium",
-            description: `Messaging only ${Math.round(recentDailyMsgs)}x/day vs ${Math.round(avgDailyMsgs)}x/day baseline`,
-            timestamp: now,
-        });
+    if (isAnomaly(targetId, "daily_message_count", recentDailyMsgs)) {
+        const z = computeZScore(targetId, "daily_message_count", recentDailyMsgs);
+        if (z > 0) {
+            const baselineDays = Math.max((since - baselineSince) / 86400000, 1);
+            const baselineMsgCount = baselineEvents.filter((e: any) => e.event_type === "MESSAGE_CREATE").length;
+            const avgDailyMsgs = baselineMsgCount / baselineDays;
+            anomalies.push({
+                type: "HIGH_MESSAGE_VOLUME",
+                severity: "low",
+                description: `Messaging ${Math.round(recentDailyMsgs)}x/day vs ${Math.round(avgDailyMsgs)}x/day baseline (z=${z.toFixed(1)})`,
+                timestamp: now,
+            });
+        } else {
+            const baselineDays = Math.max((since - baselineSince) / 86400000, 1);
+            const baselineMsgCount = baselineEvents.filter((e: any) => e.event_type === "MESSAGE_CREATE").length;
+            const avgDailyMsgs = baselineMsgCount / baselineDays;
+            anomalies.push({
+                type: "LOW_MESSAGE_VOLUME",
+                severity: "medium",
+                description: `Messaging only ${Math.round(recentDailyMsgs)}x/day vs ${Math.round(avgDailyMsgs)}x/day baseline (z=${z.toFixed(1)})`,
+                timestamp: now,
+            });
+        }
     }
 
     // 3. New game detection
@@ -104,7 +108,7 @@ export function detectAnomalies(targetId: string, days: number = 7): Anomaly[] {
         } catch { }
     }
 
-    // 4. Profile changes are always flagged
+    // 4. Profile changes
     const profileChanges = recentEvents.filter((e: any) =>
         ["PROFILE_UPDATE", "AVATAR_CHANGE", "USERNAME_CHANGE"].includes(e.event_type)
     );
@@ -117,18 +121,39 @@ export function detectAnomalies(targetId: string, days: number = 7): Anomaly[] {
         });
     }
 
-    // 5. Ghost typing spike
+    // 5. Ghost typing spike — z-score based
     const recentGhosts = recentEvents.filter((e: any) => e.event_type === "GHOST_TYPE").length;
-    const baselineGhosts = baselineEvents.filter((e: any) => e.event_type === "GHOST_TYPE").length;
-    const avgGhosts = baselineGhosts / baselineDays;
     const recentGhostDaily = recentGhosts / days;
-    if (avgGhosts > 1 && recentGhostDaily > avgGhosts * 3) {
-        anomalies.push({
-            type: "GHOST_TYPE_SPIKE",
-            severity: "low",
-            description: `Ghost typing rate spiked: ${Math.round(recentGhostDaily)}/day vs ${Math.round(avgGhosts)}/day`,
-            timestamp: now,
-        });
+    if (isAnomaly(targetId, "daily_ghost_type_count", recentGhostDaily)) {
+        const z = computeZScore(targetId, "daily_ghost_type_count", recentGhostDaily);
+        if (z > 0) {
+            const baselineDays = Math.max((since - baselineSince) / 86400000, 1);
+            const baselineGhosts = baselineEvents.filter((e: any) => e.event_type === "GHOST_TYPE").length;
+            const avgGhosts = baselineGhosts / baselineDays;
+            anomalies.push({
+                type: "GHOST_TYPE_SPIKE",
+                severity: "low",
+                description: `Ghost typing rate spiked: ${Math.round(recentGhostDaily)}/day vs ${Math.round(avgGhosts)}/day (z=${z.toFixed(1)})`,
+                timestamp: now,
+            });
+        }
+    }
+
+    // 6. Low active time anomaly (new — target has gone quiet)
+    const recentActiveMins = recentEvents
+        .filter((e: any) => e.event_type === "PRESENCE_UPDATE")
+        .length; // rough proxy
+
+    if (isAnomaly(targetId, "daily_active_minutes", recentActiveMins / days)) {
+        const z = computeZScore(targetId, "daily_active_minutes", recentActiveMins / days);
+        if (z < -2) {
+            anomalies.push({
+                type: "LOW_ACTIVE_TIME",
+                severity: "medium",
+                description: `Active time unusually low (z=${z.toFixed(1)}) — target may have gone quiet`,
+                timestamp: now,
+            });
+        }
     }
 
     anomalies.sort((a, b) => b.timestamp - a.timestamp);

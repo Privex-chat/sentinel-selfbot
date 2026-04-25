@@ -17,19 +17,35 @@ export function pushSSEEvent(event: any): void {
 }
 
 export function registerEventRoutes(app: FastifyInstance): void {
-    app.get<{ Querystring: { targetId?: string; type?: string; since?: string; until?: string; limit?: string; offset?: string; guildId?: string; channelId?: string } }>("/api/events", async (req) => {
+    app.get<{
+        Querystring: {
+            targetId?: string;
+            type?: string;
+            since?: string;
+            until?: string;
+            limit?: string;
+            offset?: string;
+            guildId?: string;
+            channelId?: string;
+            search?: string;
+        };
+    }>("/api/events", async (req) => {
         const db = getDb();
-        const { targetId, type, since, until, limit, offset, guildId, channelId } = req.query;
+        const { targetId, type, since, until, limit, offset, guildId, channelId, search } = req.query;
 
         let sql = "SELECT * FROM events WHERE 1=1";
         const params: any[] = [];
 
-        if (targetId) { sql += " AND target_id = ?"; params.push(targetId); }
-        if (type) { sql += " AND event_type = ?"; params.push(type); }
-        if (since) { sql += " AND timestamp >= ?"; params.push(parseInt(since)); }
-        if (until) { sql += " AND timestamp <= ?"; params.push(parseInt(until)); }
-        if (guildId) { sql += " AND guild_id = ?"; params.push(guildId); }
-        if (channelId) { sql += " AND channel_id = ?"; params.push(channelId); }
+        if (targetId)  { sql += " AND target_id = ?";   params.push(targetId); }
+        if (type)      { sql += " AND event_type = ?";  params.push(type); }
+        if (since)     { sql += " AND timestamp >= ?";  params.push(parseInt(since)); }
+        if (until)     { sql += " AND timestamp <= ?";  params.push(parseInt(until)); }
+        if (guildId)   { sql += " AND guild_id = ?";    params.push(guildId); }
+        if (channelId) { sql += " AND channel_id = ?";  params.push(channelId); }
+        if (search)    {
+            sql += " AND (data LIKE ? OR event_type LIKE ?)";
+            params.push(`%${search}%`, `%${search}%`);
+        }
 
         sql += " ORDER BY timestamp DESC";
         sql += ` LIMIT ? OFFSET ?`;

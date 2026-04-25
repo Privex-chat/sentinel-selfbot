@@ -15,6 +15,13 @@ export interface AlertRule {
     condition: AlertCondition;
     enabled: number;
     created_at: number;
+    // v2 fields
+    fire_count_24h: number;
+    last_fire_at: number | null;
+    auto_suppressed: number;
+    fatigue_threshold: number;
+    composite_condition: string | null;
+    digest_mode: number;
 }
 
 export const ALERT_TYPES = {

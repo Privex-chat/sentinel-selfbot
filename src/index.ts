@@ -31,17 +31,26 @@ import { startMutualServersPoller, stopMutualServersPoller } from "./pollers/mut
 import { startConnectedAccountsPoller, stopConnectedAccountsPoller } from "./pollers/connected-accounts";
 import { startApiServer } from "./api/server";
 import { pushSSEEvent } from "./api/routes/events";
-import { setAlertCallback, reloadRules, evaluateEvent } from "./alerts/engine";
+import { setAlertCallback, reloadRules, evaluateEvent, resetAlertFireCounts } from "./alerts/engine";
 import { computeDailySummaries } from "./daily-summary";
 import { initSupabaseSync, SupabaseSyncEngine } from "./database/supabase-sync";
+import { runAISocialGraphAnalysis } from "./analyzers/social-graph-ai";
+import { runAllCategorization } from "./categorization/categorizer";
+import { runAllBaselineComputation } from "./analyzers/baseline";
+import { scheduleBriefGeneration } from "./briefs/brief-generator";
+import { startBackfillOnStartup } from "./backfill/backfill-engine";
+import { startDigestFlusher } from "./alerts/digest";
 
 const log = createLogger("Sentinel");
 
-let gateway:                GatewayClient | null      = null;
-let dailySummaryInterval:   NodeJS.Timeout | null      = null;
-let voiceParticipantInterval: NodeJS.Timeout | null    = null;
-let heartbeatInterval:      NodeJS.Timeout | null      = null;
-let supabaseSync:           SupabaseSyncEngine | null  = null;
+let gateway:                  GatewayClient | null      = null;
+let dailySummaryInterval:     NodeJS.Timeout | null      = null;
+let voiceParticipantInterval: NodeJS.Timeout | null      = null;
+let heartbeatInterval:        NodeJS.Timeout | null      = null;
+let supabaseSync:             SupabaseSyncEngine | null  = null;
+let briefHandle:              NodeJS.Timeout | null      = null;
+let digestHandle:             NodeJS.Timeout | null      = null;
+let aiAnalysisInterval:       NodeJS.Timeout | null      = null;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -392,6 +401,9 @@ function shutdown(): void {
     if (dailySummaryInterval)    clearInterval(dailySummaryInterval);
     if (voiceParticipantInterval) clearInterval(voiceParticipantInterval);
     if (heartbeatInterval)       clearInterval(heartbeatInterval);
+    if (aiAnalysisInterval)      clearInterval(aiAnalysisInterval);
+    if (digestHandle)            clearInterval(digestHandle);
+    if (briefHandle)             clearTimeout(briefHandle);
 
     stopProfilePoller();
     stopStatusPoller();
@@ -497,16 +509,61 @@ async function main(): Promise<void> {
 
     startVoiceParticipantTracker(gateway);
 
-    // Daily summaries
+    // Daily summaries + baseline computation + alert fire count reset
     dailySummaryInterval = setInterval(() => {
         try { computeDailySummaries(); }
         catch (err: any) { log.error(`Daily summary error: ${err.message}`); }
+        try { runAllBaselineComputation(); }
+        catch (err: any) { log.error(`Baseline computation error: ${err.message}`); }
+        try { resetAlertFireCounts(); }
+        catch (err: any) { log.error(`Alert fire count reset error: ${err.message}`); }
     }, withJitter(config.dailySummaryIntervalMs));
 
-    // Run first summary after 2 minutes
+    // Run first summary + baselines after 2 minutes
     setTimeout(() => {
         try { computeDailySummaries(); } catch { /* non-fatal */ }
+        try { runAllBaselineComputation(); } catch { /* non-fatal */ }
     }, 120_000);
+
+    // Brief scheduler
+    briefHandle = scheduleBriefGeneration();
+
+    // Digest flusher (only if digest mode enabled)
+    if (config.alertDigestMode) {
+        digestHandle = startDigestFlusher();
+    }
+
+    // Backfill on startup (targets with no backfill data)
+    if (config.backfillEnabled) {
+        setTimeout(() => {
+            startBackfillOnStartup().catch(err =>
+                log.error(`Startup backfill error: ${err.message}`)
+            );
+        }, 120_000);
+    }
+
+    // AI analysis loop
+    if (config.aiProvider !== "none") {
+        // Delayed first run: 10 minutes after startup
+        setTimeout(async () => {
+            try {
+                await runAllBaselineComputation();
+                await runAISocialGraphAnalysis();
+                await runAllCategorization();
+            } catch (err: any) {
+                log.error(`AI analysis first run error: ${err.message}`);
+            }
+
+            aiAnalysisInterval = setInterval(async () => {
+                try { await runAllBaselineComputation(); }
+                catch (err: any) { log.error(`AI baseline error: ${err.message}`); }
+                try { await runAISocialGraphAnalysis(); }
+                catch (err: any) { log.error(`AI social graph error: ${err.message}`); }
+                try { await runAllCategorization(); }
+                catch (err: any) { log.error(`AI categorization error: ${err.message}`); }
+            }, config.aiAnalysisIntervalMs);
+        }, 600_000);
+    }
 
     log.info("=== Sentinel Fully Operational ===");
 }

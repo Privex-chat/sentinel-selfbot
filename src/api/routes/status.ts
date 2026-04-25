@@ -4,6 +4,7 @@ import { getDb } from "../../database/connection";
 import { getCurrentPresence } from "../../collectors/presence";
 import { getCurrentActivities } from "../../collectors/activity";
 import { getCurrentVoiceState } from "../../collectors/voice";
+import { generateBriefForTarget } from "../../briefs/brief-generator";
 
 const startTime = Date.now();
 
@@ -70,6 +71,41 @@ export function registerStatusRoutes(app: FastifyInstance): void {
         const stmts = getStmts();
         return stmts.getLatestSnapshot.get(req.params.userId) || null;
     });
+
+    // ── Daily briefs ───────────────────────────────────────────────────────────
+
+    app.get<{ Params: { userId: string }; Querystring: { limit?: string } }>(
+        "/api/targets/:userId/briefs",
+        async (req) => {
+            const stmts = getStmts();
+            const limit = parseInt(req.query.limit || "30");
+            return stmts.getDailyBriefs.all(req.params.userId, limit);
+        }
+    );
+
+    app.get<{ Params: { userId: string; date: string } }>(
+        "/api/targets/:userId/briefs/:date",
+        async (req, reply) => {
+            const stmts = getStmts();
+            const row = stmts.getDailyBriefByDate.get(req.params.userId, req.params.date);
+            if (!row) return reply.code(404).send({ error: "Brief not found" });
+            return row;
+        }
+    );
+
+    app.post<{ Params: { userId: string }; Querystring: { date?: string } }>(
+        "/api/targets/:userId/briefs/generate",
+        async (req, reply) => {
+            const { userId } = req.params;
+            const dateStr = req.query.date || new Date().toISOString().split("T")[0];
+            const stmts = getStmts();
+            const target = stmts.getTarget.get(userId) as any;
+            if (!target) return reply.code(404).send({ error: "Target not found" });
+
+            const briefText = await generateBriefForTarget(userId, dateStr);
+            return { success: true, date: dateStr, brief_text: briefText };
+        }
+    );
 }
 
 function formatUptime(ms: number): string {

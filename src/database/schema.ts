@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const CREATE_TABLES_SQL = `
 -- Core tables
@@ -204,6 +204,104 @@ CREATE INDEX IF NOT EXISTS idx_daily_target ON daily_summaries(target_id, date);
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
 );
+
+-- ── Relationship Analysis (AI Social Graph) ────────────────────────────────
+CREATE TABLE IF NOT EXISTS relationship_analysis (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id TEXT NOT NULL,
+    other_user_id TEXT NOT NULL,
+    classification TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.0,
+    reasoning TEXT,
+    analyzed_at INTEGER NOT NULL,
+    data_window_start INTEGER NOT NULL,
+    data_window_end INTEGER NOT NULL,
+    UNIQUE(target_id, other_user_id),
+    FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_relationship_target
+    ON relationship_analysis(target_id, analyzed_at DESC);
+
+-- ── Relationship History ────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS relationship_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id TEXT NOT NULL,
+    other_user_id TEXT NOT NULL,
+    classification TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    recorded_at INTEGER NOT NULL,
+    FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_relationship_history_pair
+    ON relationship_history(target_id, other_user_id, recorded_at DESC);
+
+-- ── Daily Briefs ───────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS daily_briefs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id TEXT NOT NULL,
+    date TEXT NOT NULL,
+    brief_text TEXT NOT NULL,
+    generated_at INTEGER NOT NULL,
+    UNIQUE(target_id, date),
+    FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_daily_briefs_target
+    ON daily_briefs(target_id, date DESC);
+
+-- ── Backfill Progress ──────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS backfill_progress (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    messages_found INTEGER NOT NULL DEFAULT 0,
+    oldest_message_id TEXT,
+    started_at INTEGER,
+    completed_at INTEGER,
+    error TEXT,
+    UNIQUE(target_id, channel_id),
+    FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_backfill_target
+    ON backfill_progress(target_id, status);
+
+-- ── Behavioral Baselines ───────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS behavioral_baselines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    baseline_value REAL NOT NULL,
+    std_deviation REAL NOT NULL,
+    computed_at INTEGER NOT NULL,
+    data_window_days INTEGER NOT NULL DEFAULT 30,
+    UNIQUE(target_id, metric_name),
+    FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE
+);
+
+-- ── Target Config ──────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS target_config (
+    target_id TEXT PRIMARY KEY,
+    social_weight_messages REAL NOT NULL DEFAULT 3.0,
+    social_weight_reactions REAL NOT NULL DEFAULT 1.0,
+    social_weight_voice_hours REAL NOT NULL DEFAULT 5.0,
+    social_weight_mentions REAL NOT NULL DEFAULT 2.0,
+    anomaly_z_threshold REAL NOT NULL DEFAULT 2.0,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE
+);
+
+-- ── Message Categories ─────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS message_categories (
+    message_id TEXT PRIMARY KEY,
+    target_id TEXT NOT NULL,
+    category TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    categorized_at INTEGER NOT NULL,
+    FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_msg_categories_target
+    ON message_categories(target_id, category);
 
 -- ─── Supabase sync state ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS sync_state (

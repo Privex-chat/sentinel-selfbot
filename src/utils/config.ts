@@ -55,6 +55,28 @@ export const config = {
         (normaliseDbMode(process.env.DB_MODE || "local") === "cloud" ? "30000" : "300000"),
         10
     ),
+
+    // ── AI Provider ───────────────────────────────────────────────────────────
+    aiProvider:            (process.env.AI_PROVIDER || "none") as "none" | "ollama" | "openai" | "anthropic",
+    aiModel:               process.env.AI_MODEL || "llama3.2",
+    aiApiKey:              process.env.AI_API_KEY || "",
+    aiBaseUrl:             process.env.AI_BASE_URL || "http://localhost:11434/v1",
+    aiAnalysisIntervalMs:  parseInt(process.env.AI_ANALYSIS_INTERVAL_MS || "86400000", 10),
+    aiCategorizationBatchSize: parseInt(process.env.AI_CATEGORIZATION_BATCH_SIZE || "50", 10),
+
+    // ── Backfill ──────────────────────────────────────────────────────────────
+    backfillMaxDays:       parseInt(process.env.BACKFILL_MAX_DAYS || "90", 10),
+    backfillMaxMsgsPerChannel: parseInt(process.env.BACKFILL_MAX_MESSAGES_PER_CHANNEL || "5000", 10),
+    backfillEnabled:       process.env.BACKFILL_ENABLED !== "false",
+
+    // ── Alerts ────────────────────────────────────────────────────────────────
+    alertDigestMode:       process.env.ALERT_DIGEST_MODE === "true",
+    alertDigestIntervalMs: parseInt(process.env.ALERT_DIGEST_INTERVAL_MS || "900000", 10),
+    alertFatigueThreshold: parseInt(process.env.ALERT_FATIGUE_THRESHOLD || "20", 10),
+    alertWebhookUrl:       process.env.ALERT_WEBHOOK_URL || "",
+
+    // ── Briefs ────────────────────────────────────────────────────────────────
+    briefGenerationTime:   process.env.BRIEF_GENERATION_TIME || "07:00",
 };
 
 export function validateConfig(): void {

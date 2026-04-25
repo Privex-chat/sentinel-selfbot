@@ -27,6 +27,25 @@ export function runMigrations(): void {
     }
 }
 
-function applyMigration(_version: number): void {
-    // Future migrations will be added here as switch cases
+function applyMigration(version: number): void {
+    switch (version) {
+        case 2: {
+            const db = getDb();
+            const alterColumns = [
+                "ALTER TABLE alert_rules ADD COLUMN fire_count_24h INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE alert_rules ADD COLUMN last_fire_at INTEGER",
+                "ALTER TABLE alert_rules ADD COLUMN auto_suppressed INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE alert_rules ADD COLUMN fatigue_threshold INTEGER NOT NULL DEFAULT 20",
+                "ALTER TABLE alert_rules ADD COLUMN composite_condition TEXT",
+                "ALTER TABLE alert_rules ADD COLUMN digest_mode INTEGER NOT NULL DEFAULT 0",
+            ];
+            for (const sql of alterColumns) {
+                try { db.exec(sql); } catch { /* column may already exist */ }
+            }
+            log.info("Migration v2: alert_rules columns added");
+            break;
+        }
+        default:
+            break;
+    }
 }

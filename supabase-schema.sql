@@ -540,3 +540,188 @@ ALTER TABLE public.guild_member_events  DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.alert_rules          DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.alert_history        DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.daily_summaries      DISABLE ROW LEVEL SECURITY;
+
+
+-- =============================================================================
+-- SCHEMA v2 ADDITIONS
+-- =============================================================================
+
+-- ── alert_rules — new columns ─────────────────────────────────────────────────
+
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='alert_rules' AND column_name='fire_count_24h') THEN
+        ALTER TABLE public.alert_rules ADD COLUMN fire_count_24h  INTEGER NOT NULL DEFAULT 0;
+    END IF;
+END $$;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='alert_rules' AND column_name='last_fire_at') THEN
+        ALTER TABLE public.alert_rules ADD COLUMN last_fire_at    BIGINT;
+    END IF;
+END $$;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='alert_rules' AND column_name='auto_suppressed') THEN
+        ALTER TABLE public.alert_rules ADD COLUMN auto_suppressed  INTEGER NOT NULL DEFAULT 0;
+    END IF;
+END $$;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='alert_rules' AND column_name='fatigue_threshold') THEN
+        ALTER TABLE public.alert_rules ADD COLUMN fatigue_threshold INTEGER NOT NULL DEFAULT 20;
+    END IF;
+END $$;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='alert_rules' AND column_name='composite_condition') THEN
+        ALTER TABLE public.alert_rules ADD COLUMN composite_condition TEXT;
+    END IF;
+END $$;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='alert_rules' AND column_name='digest_mode') THEN
+        ALTER TABLE public.alert_rules ADD COLUMN digest_mode INTEGER NOT NULL DEFAULT 0;
+    END IF;
+END $$;
+
+
+-- ── relationship_analysis ─────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.relationship_analysis (
+    id                 BIGINT  PRIMARY KEY,
+    target_id          TEXT    NOT NULL,
+    other_user_id      TEXT    NOT NULL,
+    classification     TEXT    NOT NULL,
+    confidence         REAL    NOT NULL DEFAULT 0.0,
+    reasoning          TEXT,
+    analyzed_at        BIGINT  NOT NULL,
+    data_window_start  BIGINT  NOT NULL,
+    data_window_end    BIGINT  NOT NULL,
+
+    CONSTRAINT fk_rel_analysis_target
+        FOREIGN KEY (target_id) REFERENCES public.targets (user_id)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT rel_analysis_unique UNIQUE (target_id, other_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_rel_analysis_target
+    ON public.relationship_analysis (target_id, analyzed_at DESC);
+
+ALTER TABLE public.relationship_analysis DISABLE ROW LEVEL SECURITY;
+
+
+-- ── relationship_history ──────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.relationship_history (
+    id             BIGINT  PRIMARY KEY,
+    target_id      TEXT    NOT NULL,
+    other_user_id  TEXT    NOT NULL,
+    classification TEXT    NOT NULL,
+    confidence     REAL    NOT NULL,
+    recorded_at    BIGINT  NOT NULL,
+
+    CONSTRAINT fk_rel_history_target
+        FOREIGN KEY (target_id) REFERENCES public.targets (user_id)
+        ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_rel_history_pair
+    ON public.relationship_history (target_id, other_user_id, recorded_at DESC);
+
+ALTER TABLE public.relationship_history DISABLE ROW LEVEL SECURITY;
+
+
+-- ── daily_briefs ──────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.daily_briefs (
+    id           BIGINT  PRIMARY KEY,
+    target_id    TEXT    NOT NULL,
+    date         TEXT    NOT NULL,
+    brief_text   TEXT    NOT NULL,
+    generated_at BIGINT  NOT NULL,
+
+    CONSTRAINT fk_daily_briefs_target
+        FOREIGN KEY (target_id) REFERENCES public.targets (user_id)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT daily_briefs_unique UNIQUE (target_id, date)
+);
+CREATE INDEX IF NOT EXISTS idx_daily_briefs_target
+    ON public.daily_briefs (target_id, date DESC);
+
+ALTER TABLE public.daily_briefs DISABLE ROW LEVEL SECURITY;
+
+
+-- ── backfill_progress ─────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.backfill_progress (
+    id                BIGINT  PRIMARY KEY,
+    target_id         TEXT    NOT NULL,
+    guild_id          TEXT    NOT NULL,
+    channel_id        TEXT    NOT NULL,
+    status            TEXT    NOT NULL DEFAULT 'pending',
+    messages_found    INTEGER NOT NULL DEFAULT 0,
+    oldest_message_id TEXT,
+    started_at        BIGINT,
+    completed_at      BIGINT,
+    error             TEXT,
+
+    CONSTRAINT fk_backfill_target
+        FOREIGN KEY (target_id) REFERENCES public.targets (user_id)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT backfill_unique UNIQUE (target_id, channel_id)
+);
+CREATE INDEX IF NOT EXISTS idx_backfill_target
+    ON public.backfill_progress (target_id, status);
+
+ALTER TABLE public.backfill_progress DISABLE ROW LEVEL SECURITY;
+
+
+-- ── behavioral_baselines ──────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.behavioral_baselines (
+    id               BIGINT  PRIMARY KEY,
+    target_id        TEXT    NOT NULL,
+    metric_name      TEXT    NOT NULL,
+    baseline_value   REAL    NOT NULL,
+    std_deviation    REAL    NOT NULL,
+    computed_at      BIGINT  NOT NULL,
+    data_window_days INTEGER NOT NULL DEFAULT 30,
+
+    CONSTRAINT fk_baselines_target
+        FOREIGN KEY (target_id) REFERENCES public.targets (user_id)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT baselines_unique UNIQUE (target_id, metric_name)
+);
+
+ALTER TABLE public.behavioral_baselines DISABLE ROW LEVEL SECURITY;
+
+
+-- ── target_config ─────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.target_config (
+    target_id                TEXT   PRIMARY KEY,
+    social_weight_messages   REAL   NOT NULL DEFAULT 3.0,
+    social_weight_reactions  REAL   NOT NULL DEFAULT 1.0,
+    social_weight_voice_hours REAL  NOT NULL DEFAULT 5.0,
+    social_weight_mentions   REAL   NOT NULL DEFAULT 2.0,
+    anomaly_z_threshold      REAL   NOT NULL DEFAULT 2.0,
+    updated_at               BIGINT NOT NULL,
+
+    CONSTRAINT fk_target_config_target
+        FOREIGN KEY (target_id) REFERENCES public.targets (user_id)
+        ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+ALTER TABLE public.target_config DISABLE ROW LEVEL SECURITY;
+
+
+-- ── message_categories ────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.message_categories (
+    message_id     TEXT    PRIMARY KEY,
+    target_id      TEXT    NOT NULL,
+    category       TEXT    NOT NULL,
+    confidence     REAL    NOT NULL DEFAULT 1.0,
+    categorized_at BIGINT  NOT NULL,
+
+    CONSTRAINT fk_msg_cat_target
+        FOREIGN KEY (target_id) REFERENCES public.targets (user_id)
+        ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_msg_cat_target
+    ON public.message_categories (target_id, category);
+
+ALTER TABLE public.message_categories DISABLE ROW LEVEL SECURITY;

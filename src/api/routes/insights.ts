@@ -3,6 +3,7 @@ import { analyzeSleepSchedule } from "../../analyzers/sleep-schedule";
 import { detectRoutine } from "../../analyzers/routine-detector";
 import { predictAvailability } from "../../analyzers/availability";
 import { detectAnomalies } from "../../analyzers/anomaly-detector";
+import { detectCorrelations } from "../../analyzers/correlation-detector";
 
 export function registerInsightRoutes(app: FastifyInstance): void {
     app.get<{ Params: { userId: string } }>("/api/targets/:userId/insights", async (req) => {
@@ -29,8 +30,25 @@ export function registerInsightRoutes(app: FastifyInstance): void {
         return predictAvailability(req.params.userId, weeks);
     });
 
-    app.get<{ Params: { userId: string }; Querystring: { days?: string } }>("/api/targets/:userId/insights/anomalies", async (req) => {
-        const days = parseInt(req.query.days || "7");
-        return detectAnomalies(req.params.userId, days);
-    });
+    app.get<{ Params: { userId: string }; Querystring: { days?: string } }>(
+        "/api/targets/:userId/insights/anomalies",
+        async (req) => {
+            const days = parseInt(req.query.days || "7");
+            return detectAnomalies(req.params.userId, days);
+        }
+    );
+
+    app.get<{
+        Params: { userId: string };
+        Querystring: { days?: string; window_hours?: string };
+    }>(
+        "/api/targets/:userId/insights/correlations",
+        async (req) => {
+            const { userId } = req.params;
+            const days = parseInt(req.query.days || "30");
+            const windowHours = parseFloat(req.query.window_hours || "0.5");
+            const windowMs = Math.round(windowHours * 3_600_000);
+            return detectCorrelations(userId, days, windowMs);
+        }
+    );
 }

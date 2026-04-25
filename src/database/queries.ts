@@ -240,6 +240,127 @@ function prepareStatements() {
              )`
         ),
 
+        // ── Relationship analysis ──────────────────────────────────────────────
+        upsertRelationshipAnalysis: db.prepare(
+            `INSERT INTO relationship_analysis
+             (target_id, other_user_id, classification, confidence, reasoning, analyzed_at, data_window_start, data_window_end)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(target_id, other_user_id) DO UPDATE SET
+                 classification=excluded.classification, confidence=excluded.confidence,
+                 reasoning=excluded.reasoning, analyzed_at=excluded.analyzed_at,
+                 data_window_start=excluded.data_window_start, data_window_end=excluded.data_window_end`
+        ),
+        getRelationshipAnalysis: db.prepare(
+            "SELECT * FROM relationship_analysis WHERE target_id = ? ORDER BY analyzed_at DESC"
+        ),
+        getRelationshipPair: db.prepare(
+            "SELECT * FROM relationship_analysis WHERE target_id = ? AND other_user_id = ?"
+        ),
+        insertRelationshipHistory: db.prepare(
+            "INSERT INTO relationship_history (target_id, other_user_id, classification, confidence, recorded_at) VALUES (?, ?, ?, ?, ?)"
+        ),
+        getRelationshipHistory: db.prepare(
+            "SELECT * FROM relationship_history WHERE target_id = ? AND other_user_id = ? ORDER BY recorded_at DESC LIMIT ?"
+        ),
+        getRelationshipChanges: db.prepare(
+            "SELECT * FROM relationship_history WHERE target_id = ? ORDER BY recorded_at DESC LIMIT ?"
+        ),
+
+        // ── Daily briefs ───────────────────────────────────────────────────────
+        insertDailyBrief: db.prepare(
+            `INSERT INTO daily_briefs (target_id, date, brief_text, generated_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(target_id, date) DO UPDATE SET
+                 brief_text=excluded.brief_text, generated_at=excluded.generated_at`
+        ),
+        getDailyBriefs: db.prepare(
+            "SELECT * FROM daily_briefs WHERE target_id = ? ORDER BY date DESC LIMIT ?"
+        ),
+        getDailyBriefByDate: db.prepare(
+            "SELECT * FROM daily_briefs WHERE target_id = ? AND date = ?"
+        ),
+
+        // ── Backfill progress ──────────────────────────────────────────────────
+        insertBackfillProgress: db.prepare(
+            `INSERT OR IGNORE INTO backfill_progress (target_id, guild_id, channel_id, status)
+             VALUES (?, ?, ?, 'pending')`
+        ),
+        updateBackfillProgress: db.prepare(
+            `UPDATE backfill_progress SET status=?, messages_found=?, oldest_message_id=?,
+             started_at=COALESCE(started_at, ?), completed_at=?, error=?
+             WHERE target_id=? AND channel_id=?`
+        ),
+        getBackfillProgress: db.prepare(
+            "SELECT * FROM backfill_progress WHERE target_id = ? ORDER BY status, guild_id, channel_id"
+        ),
+        getPendingBackfillChannels: db.prepare(
+            "SELECT * FROM backfill_progress WHERE target_id = ? AND status IN ('pending', 'in_progress') LIMIT 50"
+        ),
+        hasBackfillData: db.prepare(
+            "SELECT COUNT(*) as count FROM backfill_progress WHERE target_id = ?"
+        ),
+
+        // ── Message categories ─────────────────────────────────────────────────
+        insertMessageCategory: db.prepare(
+            `INSERT OR REPLACE INTO message_categories (message_id, target_id, category, confidence, categorized_at)
+             VALUES (?, ?, ?, ?, ?)`
+        ),
+        getUncategorizedMessages: db.prepare(
+            `SELECT m.message_id, m.content FROM messages m
+             LEFT JOIN message_categories mc ON m.message_id = mc.message_id
+             WHERE m.target_id = ? AND mc.message_id IS NULL AND m.content IS NOT NULL AND m.content_length > 5
+             ORDER BY m.created_at DESC LIMIT ?`
+        ),
+        getCategoryBreakdown: db.prepare(
+            `SELECT category, COUNT(*) as count FROM message_categories WHERE target_id = ? GROUP BY category ORDER BY count DESC`
+        ),
+
+        // ── Behavioral baselines ───────────────────────────────────────────────
+        upsertBaselineMetric: db.prepare(
+            `INSERT INTO behavioral_baselines (target_id, metric_name, baseline_value, std_deviation, computed_at, data_window_days)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(target_id, metric_name) DO UPDATE SET
+                 baseline_value=excluded.baseline_value, std_deviation=excluded.std_deviation,
+                 computed_at=excluded.computed_at`
+        ),
+        getBaselineMetric: db.prepare(
+            "SELECT * FROM behavioral_baselines WHERE target_id = ? AND metric_name = ?"
+        ),
+        getAllBaselines: db.prepare(
+            "SELECT * FROM behavioral_baselines WHERE target_id = ?"
+        ),
+        upsertTargetConfig: db.prepare(
+            `INSERT INTO target_config (target_id, social_weight_messages, social_weight_reactions, social_weight_voice_hours, social_weight_mentions, anomaly_z_threshold, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(target_id) DO UPDATE SET
+                 social_weight_messages=excluded.social_weight_messages,
+                 social_weight_reactions=excluded.social_weight_reactions,
+                 social_weight_voice_hours=excluded.social_weight_voice_hours,
+                 social_weight_mentions=excluded.social_weight_mentions,
+                 anomaly_z_threshold=excluded.anomaly_z_threshold,
+                 updated_at=excluded.updated_at`
+        ),
+        getTargetConfig: db.prepare(
+            "SELECT * FROM target_config WHERE target_id = ?"
+        ),
+
+        // ── Alert fatigue ──────────────────────────────────────────────────────
+        incrementAlertFireCount: db.prepare(
+            "UPDATE alert_rules SET fire_count_24h = fire_count_24h + 1, last_fire_at = ? WHERE id = ?"
+        ),
+        suppressAlertRule: db.prepare(
+            "UPDATE alert_rules SET auto_suppressed = 1 WHERE id = ?"
+        ),
+        unsuppressAlertRule: db.prepare(
+            "UPDATE alert_rules SET auto_suppressed = 0, fire_count_24h = 0 WHERE id = ?"
+        ),
+        resetAlertFireCounts: db.prepare(
+            "UPDATE alert_rules SET fire_count_24h = 0 WHERE last_fire_at < ? AND last_fire_at IS NOT NULL"
+        ),
+        getSuppressedRules: db.prepare(
+            "SELECT * FROM alert_rules WHERE auto_suppressed = 1"
+        ),
+
         // ── Utility ────────────────────────────────────────────────────────────
         getDbSize: db.prepare(
             "SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()"

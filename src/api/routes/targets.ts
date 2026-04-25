@@ -1,5 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { getStmts } from "../../database/queries";
+import { config } from "../../utils/config";
+import { startBackfillForTarget } from "../../backfill/backfill-engine";
 
 export function registerTargetRoutes(app: FastifyInstance): void {
     app.get("/api/targets", async () => {
@@ -14,6 +16,12 @@ export function registerTargetRoutes(app: FastifyInstance): void {
         }
         const stmts = getStmts();
         stmts.insertTarget.run(userId, Date.now(), label || null, notes || null, priority ?? 0, 1);
+
+        if (config.backfillEnabled) {
+            // Fire-and-forget — don't block the response
+            startBackfillForTarget(userId).catch(() => { });
+        }
+
         return { success: true, userId };
     });
 

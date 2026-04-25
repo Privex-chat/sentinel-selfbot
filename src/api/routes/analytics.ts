@@ -117,6 +117,96 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
         return analyzeMusicProfile(req.params.userId, days);
     });
 
+    // ── Message categories ─────────────────────────────────────────────────────
+    app.get<{ Params: { userId: string } }>(
+        "/api/targets/:userId/analytics/categories",
+        async (req) => {
+            const stmts = getStmts();
+            return stmts.getCategoryBreakdown.all(req.params.userId);
+        }
+    );
+
+    // ── Baselines ──────────────────────────────────────────────────────────────
+    app.get<{ Params: { userId: string } }>(
+        "/api/targets/:userId/analytics/baselines",
+        async (req) => {
+            const stmts = getStmts();
+            return stmts.getAllBaselines.all(req.params.userId);
+        }
+    );
+
+    app.post<{ Params: { userId: string } }>(
+        "/api/targets/:userId/analytics/baselines/recompute",
+        async (req, reply) => {
+            const { userId } = req.params;
+            const stmts = getStmts();
+            const target = stmts.getTarget.get(userId) as any;
+            if (!target) return reply.code(404).send({ error: "Target not found" });
+
+            const { computeBaselinesForTarget } = await import("../../analyzers/baseline");
+            computeBaselinesForTarget(userId);
+            return { success: true };
+        }
+    );
+
+    // ── Target config ──────────────────────────────────────────────────────────
+    app.get<{ Params: { userId: string } }>(
+        "/api/targets/:userId/config",
+        async (req) => {
+            const stmts = getStmts();
+            const row = stmts.getTargetConfig.get(req.params.userId) as any;
+            if (row) return row;
+            // Return defaults
+            return {
+                target_id: req.params.userId,
+                social_weight_messages: 3.0,
+                social_weight_reactions: 1.0,
+                social_weight_voice_hours: 5.0,
+                social_weight_mentions: 2.0,
+                anomaly_z_threshold: 2.0,
+            };
+        }
+    );
+
+    app.patch<{
+        Params: { userId: string };
+        Body: {
+            social_weight_messages?: number;
+            social_weight_reactions?: number;
+            social_weight_voice_hours?: number;
+            social_weight_mentions?: number;
+            anomaly_z_threshold?: number;
+        };
+    }>(
+        "/api/targets/:userId/config",
+        async (req, reply) => {
+            const { userId } = req.params;
+            const stmts = getStmts();
+            const target = stmts.getTarget.get(userId) as any;
+            if (!target) return reply.code(404).send({ error: "Target not found" });
+
+            const existing = (stmts.getTargetConfig.get(userId) as any) || {
+                social_weight_messages: 3.0,
+                social_weight_reactions: 1.0,
+                social_weight_voice_hours: 5.0,
+                social_weight_mentions: 2.0,
+                anomaly_z_threshold: 2.0,
+            };
+
+            const body = req.body;
+            stmts.upsertTargetConfig.run(
+                userId,
+                body.social_weight_messages ?? existing.social_weight_messages,
+                body.social_weight_reactions ?? existing.social_weight_reactions,
+                body.social_weight_voice_hours ?? existing.social_weight_voice_hours,
+                body.social_weight_mentions ?? existing.social_weight_mentions,
+                body.anomaly_z_threshold ?? existing.anomaly_z_threshold,
+                Date.now()
+            );
+            return { success: true };
+        }
+    );
+
     // ── Typing / ghost-type stats ──────────────────────────────────────────────
     app.get<{
         Params: { userId: string };

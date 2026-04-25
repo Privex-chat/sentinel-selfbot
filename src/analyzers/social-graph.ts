@@ -1,5 +1,6 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
+import { getTargetConfig } from "./baseline";
 
 const log = createLogger("SocialGraph");
 
@@ -20,6 +21,7 @@ export interface SocialGraphData {
 
 export function buildSocialGraph(targetId: string, days: number = 30): SocialGraphData {
     const stmts = getStmts();
+    const cfg = getTargetConfig(targetId);
     const since = Date.now() - days * 86400000;
     const scores: Map<string, { messages: number; reactions: number; voice: number; mentions: number }> = new Map();
 
@@ -38,9 +40,9 @@ export function buildSocialGraph(targetId: string, days: number = 30): SocialGra
         if (msg.is_reply && msg.reply_to_user_id && msg.reply_to_user_id !== targetId) {
             getOrCreate(msg.reply_to_user_id).messages++;
         }
-        // Extract mentions from message content
         if (msg.content) {
             let match;
+            MENTION_RE.lastIndex = 0;
             while ((match = MENTION_RE.exec(msg.content)) !== null) {
                 const mentionedId = match[1];
                 if (mentionedId !== targetId) {
@@ -74,17 +76,15 @@ export function buildSocialGraph(targetId: string, days: number = 30): SocialGra
         } catch { }
     }
 
-    // Build connections
+    // Build connections with config-driven weights
     const connections: SocialConnection[] = [];
     for (const [userId, data] of scores) {
-        const score = data.messages * 3 + data.reactions * 1 + (data.voice / 3600000) * 5 + data.mentions * 2;
+        const score =
+            data.messages * cfg.social_weight_messages +
+            data.reactions * cfg.social_weight_reactions +
+            (data.voice / 3600000) * cfg.social_weight_voice_hours +
+            data.mentions * cfg.social_weight_mentions;
         if (score <= 0) continue;
-
-        let relationship = "acquaintance";
-        if (data.voice > 3600000 && data.messages > 5) relationship = "close friend (voice + messages)";
-        else if (data.voice > 7200000) relationship = "voice buddy";
-        else if (data.messages > 20) relationship = "frequent chat partner";
-        else if (data.reactions > 10) relationship = "frequent reactor";
 
         connections.push({
             userId,
@@ -93,11 +93,30 @@ export function buildSocialGraph(targetId: string, days: number = 30): SocialGra
             reactionInteractions: data.reactions,
             voiceTime: data.voice,
             mentionCount: data.mentions,
-            relationship,
+            relationship: "", // filled below after sorting
         });
     }
 
     connections.sort((a, b) => b.score - a.score);
+
+    // Classify by percentile rank within this target's network
+    const n = connections.length;
+    for (let i = 0; i < n; i++) {
+        const percentile = n > 1 ? (n - 1 - i) / (n - 1) : 1;
+        const c = connections[i];
+
+        if (percentile >= 0.90 || (c.voiceTime > 3600000 && c.messageInteractions > 5)) {
+            c.relationship = "close friend";
+        } else if (percentile >= 0.70 || c.voiceTime > 7200000) {
+            c.relationship = "frequent partner";
+        } else if (percentile >= 0.50 || c.messageInteractions > 10) {
+            c.relationship = "regular contact";
+        } else if (c.reactionInteractions > 5) {
+            c.relationship = "reactor";
+        } else {
+            c.relationship = "acquaintance";
+        }
+    }
 
     return {
         connections: connections.slice(0, 50),

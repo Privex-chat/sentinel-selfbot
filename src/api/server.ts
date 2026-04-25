@@ -11,6 +11,8 @@ import { registerTimelineRoutes } from "./routes/timeline";
 import { registerAlertRoutes } from "./routes/alerts";
 import { registerExportRoutes } from "./routes/export";
 import { registerStatusRoutes } from "./routes/status";
+import { registerSocialRoutes } from "./routes/social";
+import { registerBackfillRoutes } from "./routes/backfill";
 
 const log = createLogger("API");
 
@@ -40,6 +42,8 @@ export async function startApiServer(): Promise<void> {
     registerAlertRoutes(app);
     registerExportRoutes(app);
     registerStatusRoutes(app);
+    registerSocialRoutes(app);
+    registerBackfillRoutes(app);
 
     try {
         await app.listen({ port: config.apiPort, host: "0.0.0.0" });

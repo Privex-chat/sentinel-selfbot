@@ -157,6 +157,14 @@ export class SupabaseSyncEngine {
             await this.syncGuildMemberEvents(db);
             await this.syncAlertHistory(db, windowStart);
             await this.syncDailySummaries(db);
+            // v2 tables
+            await this.syncRelationshipAnalysis(db);
+            await this.syncRelationshipHistory(db);
+            await this.syncDailyBriefs(db);
+            await this.syncBackfillProgress(db);
+            await this.syncBehavioralBaselines(db);
+            await this.syncTargetConfig(db);
+            await this.syncMessageCategories(db, windowStart);
 
             log.info(`Supabase sync cycle completed in ${Date.now() - started}ms`);
         } catch (err: any) {
@@ -419,11 +427,77 @@ export class SupabaseSyncEngine {
         const rows = db
             .prepare("SELECT * FROM daily_summaries WHERE date >= ? ORDER BY date")
             .all(sevenDaysAgo) as any[];
-    
+
         if (!rows.length) return;
-        // Upsert on primary key — avoids the "duplicate key on daily_summaries_pkey" error
         await upsertBatched(this.supabase, "daily_summaries", rows, "id");
         log.debug(`daily_summaries: synced ${rows.length} rows`);
+    }
+
+    // ── v2 tables ──────────────────────────────────────────────────────────────
+
+    private async syncRelationshipAnalysis(db: Database.Database): Promise<void> {
+        const { lastId } = getSyncState(db, "relationship_analysis");
+        const rows = db
+            .prepare("SELECT * FROM relationship_analysis WHERE id > ? ORDER BY id LIMIT ?")
+            .all(lastId, BATCH_SIZE * 5) as any[];
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "relationship_analysis", rows, "id");
+        setSyncState(db, "relationship_analysis", Math.max(...rows.map((r) => r.id)));
+        log.debug(`relationship_analysis: synced ${rows.length} rows`);
+    }
+
+    private async syncRelationshipHistory(db: Database.Database): Promise<void> {
+        const { lastId } = getSyncState(db, "relationship_history");
+        const rows = db
+            .prepare("SELECT * FROM relationship_history WHERE id > ? ORDER BY id LIMIT ?")
+            .all(lastId, BATCH_SIZE * 5) as any[];
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "relationship_history", rows, "id");
+        setSyncState(db, "relationship_history", Math.max(...rows.map((r) => r.id)));
+        log.debug(`relationship_history: synced ${rows.length} rows`);
+    }
+
+    private async syncDailyBriefs(db: Database.Database): Promise<void> {
+        const rows = db.prepare("SELECT * FROM daily_briefs ORDER BY id").all() as any[];
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "daily_briefs", rows, "id");
+        log.debug(`daily_briefs: synced ${rows.length} rows`);
+    }
+
+    private async syncBackfillProgress(db: Database.Database): Promise<void> {
+        const rows = db.prepare("SELECT * FROM backfill_progress ORDER BY id").all() as any[];
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "backfill_progress", rows, "id");
+        log.debug(`backfill_progress: synced ${rows.length} rows`);
+    }
+
+    private async syncBehavioralBaselines(db: Database.Database): Promise<void> {
+        const rows = db.prepare("SELECT * FROM behavioral_baselines ORDER BY id").all() as any[];
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "behavioral_baselines", rows, "id");
+        log.debug(`behavioral_baselines: synced ${rows.length} rows`);
+    }
+
+    private async syncTargetConfig(db: Database.Database): Promise<void> {
+        const rows = db.prepare("SELECT * FROM target_config").all() as any[];
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "target_config", rows, "target_id");
+        log.debug(`target_config: synced ${rows.length} rows`);
+    }
+
+    private async syncMessageCategories(
+        db: Database.Database,
+        windowStart: number
+    ): Promise<void> {
+        const state = getSyncState(db, "message_categories");
+        const since = state.lastAt > 0 ? Math.max(0, state.lastAt - UPDATE_WINDOW_MS) : 0;
+        const rows = db
+            .prepare("SELECT * FROM message_categories WHERE categorized_at >= ? ORDER BY categorized_at LIMIT ?")
+            .all(since, BATCH_SIZE * 5) as any[];
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "message_categories", rows, "message_id");
+        setSyncState(db, "message_categories", 0, Date.now());
+        log.debug(`message_categories: synced ${rows.length} rows`);
     }
 }
 
