@@ -13,6 +13,9 @@ export function runMigrations(): void {
     const currentVersion = versionRow?.version ?? 0;
 
     if (currentVersion === 0) {
+        for (let v = 1; v <= SCHEMA_VERSION; v++) {
+            applyMigration(v);
+        }
         db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(SCHEMA_VERSION);
         log.info(`Database initialized at schema version ${SCHEMA_VERSION}`);
     } else if (currentVersion < SCHEMA_VERSION) {
