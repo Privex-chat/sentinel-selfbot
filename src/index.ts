@@ -376,6 +376,7 @@ const COLLECTOR_EVALUATED_EVENTS = new Set([
     "PRESENCE_UPDATE",   // presence.ts — uses newStatus/oldStatus shape
     "VOICE_STATE_UPDATE", // voice.ts — emits VOICE_JOIN/VOICE_LEAVE directly
     "TYPING_START",       // typing.ts — GHOST_TYPE fired from timeout callback
+    "MESSAGE_CREATE",     // message.ts — evaluates with processed camelCase eventData
 ]);
 
 function pushEvent(targetId: string, eventType: string, data: any): void {
@@ -542,10 +543,9 @@ async function main(): Promise<void> {
     // Brief scheduler
     briefHandle = scheduleBriefGeneration();
 
-    // Digest flusher (only if digest mode enabled)
-    if (config.alertDigestMode) {
-        digestHandle = startDigestFlusher();
-    }
+    // Digest flusher — always start so per-rule digest_mode=1 rules are flushed
+    // even when global alertDigestMode is off. No-op when buffer is empty.
+    digestHandle = startDigestFlusher();
 
     // Backfill on startup (targets with no backfill data)
     if (config.backfillEnabled) {

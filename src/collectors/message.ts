@@ -1,6 +1,7 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
 import { resolveTypingWithMessage } from "./typing";
+import { evaluateEvent } from "../alerts/engine";
 
 const log = createLogger("Message");
 
@@ -61,6 +62,7 @@ export function handleMessageCreate(targetId: string, message: any, guildId: str
     const eventData = JSON.stringify({
         messageId: message.id,
         channelId: message.channel_id,
+        guildId,
         contentLength: content.length,
         wordCount: analysis.wordCount,
         attachmentCount,
@@ -69,6 +71,9 @@ export function handleMessageCreate(targetId: string, message: any, guildId: str
         replyToUserId,
     });
     stmts.insertEvent.run(targetId, "MESSAGE_CREATE", createdAt, eventData, guildId, message.channel_id);
+
+    // Evaluate alerts with properly shaped camelCase data (not raw Discord payload)
+    evaluateEvent("MESSAGE_CREATE", targetId, eventData, createdAt);
 
     // Resolve typing ghost detection
     resolveTypingWithMessage(targetId, message.channel_id);

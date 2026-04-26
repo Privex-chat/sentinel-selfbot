@@ -409,6 +409,8 @@ function fireAlert(
                 timestamp: now,
             });
 
+        log.info(`Sending webhook for [${rule.rule_type}] target=${targetId} (${isDiscord ? "discord" : "generic"})`);
+
         fetch(config.alertWebhookUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -421,7 +423,7 @@ function fireAlert(
                         `Webhook delivery failed: HTTP ${res.status} — ${text.slice(0, 200)}`
                     );
                 } else {
-                    log.debug(
+                    log.info(
                         `Webhook delivered OK for [${rule.rule_type}] target=${targetId}`
                     );
                 }
@@ -429,6 +431,8 @@ function fireAlert(
             .catch((err) =>
                 log.warn(`Webhook delivery error: ${err.message}`)
             );
+    } else {
+        log.warn(`No ALERT_WEBHOOK_URL set — alert [${rule.rule_type}] not delivered via webhook`);
     }
 }
 

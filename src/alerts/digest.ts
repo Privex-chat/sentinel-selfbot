@@ -73,7 +73,7 @@ function flushDigest(): void {
 }
 
 export function startDigestFlusher(): NodeJS.Timeout {
-    log.info(`Alert digest mode enabled (flush every ${config.alertDigestIntervalMs / 1000}s)`);
+    log.info(`Digest flusher started (interval: ${config.alertDigestIntervalMs / 1000}s)`);
     return setInterval(() => {
         try { flushDigest(); }
         catch (err: any) { log.error(`Digest flush error: ${err.message}`); }
