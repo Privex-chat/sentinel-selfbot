@@ -96,7 +96,7 @@ export class AnthropicProvider implements AIProvider {
 // (social graph analyzer, categorizer, brief generator) regardless of which
 // code path invoked complete().
 
-const GEMINI_MIN_GAP_MS = 4_500;
+const GEMINI_MIN_GAP_MS = 6_500;
 let geminiLastRequestAt = 0;
 
 async function geminiRateWait(): Promise<void> {
