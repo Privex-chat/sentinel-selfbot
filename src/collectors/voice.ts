@@ -1,5 +1,6 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
+import { evaluateEvent } from "../alerts/engine";
 
 const log = createLogger("Voice");
 
@@ -46,6 +47,7 @@ export function handleVoiceStateUpdate(targetId: string, data: any): void {
                 channelId: current.channelId,
             });
             stmts.insertEvent.run(targetId, "VOICE_LEAVE", now, eventData, current.guildId, current.channelId);
+            evaluateEvent("VOICE_LEAVE", targetId, eventData, now);
             log.debug(`${targetId}: left voice ${current.channelId}`);
         }
         return;
@@ -74,6 +76,7 @@ export function handleVoiceStateUpdate(targetId: string, data: any): void {
 
         const eventData = JSON.stringify({ guildId, channelId: newChannelId });
         stmts.insertEvent.run(targetId, "VOICE_JOIN", now, eventData, guildId, newChannelId);
+        evaluateEvent("VOICE_JOIN", targetId, eventData, now);
         log.debug(`${targetId}: joined voice ${newChannelId}`);
         return;
     }

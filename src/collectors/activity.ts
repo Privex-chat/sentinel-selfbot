@@ -1,5 +1,6 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
+import { evaluateEvent } from "../alerts/engine";
 
 const log = createLogger("Activity");
 
@@ -100,6 +101,9 @@ export function handleActivityUpdate(targetId: string, activities: any[]): void 
                 stmts.insertEvent.run(targetId, eventType, now, eventData, null, null);
             }
 
+            // Fire alert evaluation for ACTIVITY_START (covers STARTS_ACTIVITY, NEW_GAME)
+            evaluateEvent("ACTIVITY_START", targetId, eventData, now);
+
             log.debug(`${targetId}: activity start - ${activity.name} (type ${activity.type})`);
         }
     }
@@ -131,6 +135,10 @@ export function handleActivityUpdate(targetId: string, activities: any[]): void 
             else if (activity.type === 1) eventType = "STREAMING_END";
 
             stmts.insertEvent.run(targetId, eventType, now, eventData, null, null);
+
+            // Fire alert evaluation for ACTIVITY_END (covers STOPS_ACTIVITY)
+            evaluateEvent("ACTIVITY_END", targetId, eventData, now);
+
             log.debug(`${targetId}: activity end - ${activity.name}`);
         }
     }

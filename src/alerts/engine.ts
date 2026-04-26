@@ -243,8 +243,13 @@ function matchesCondition(
         case "SENDS_MESSAGE": {
             if (eventType !== "MESSAGE_CREATE") return false;
             const parsed = typeof data === "string" ? JSON.parse(data) : data;
-            if (cond.field === "channelId" && cond.value) return parsed.channelId === cond.value;
-            if (cond.field === "guildId" && cond.value) return parsed.guildId === cond.value;
+            // Discord gateway uses snake_case; normalise both
+            if (cond.field === "channelId" && cond.value) {
+                return parsed.channelId === cond.value || parsed.channel_id === cond.value;
+            }
+            if (cond.field === "guildId" && cond.value) {
+                return parsed.guildId === cond.value || parsed.guild_id === cond.value;
+            }
             return true;
         }
 
@@ -366,17 +371,30 @@ function fireAlert(
 
     // Webhook delivery (non-blocking)
     if (config.alertWebhookUrl) {
-        fetch(config.alertWebhookUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
+        const isDiscord = /https?:\/\/(?:discord\.com|discordapp\.com)\/api\/webhooks\//i.test(config.alertWebhookUrl);
+        const body = isDiscord
+            ? JSON.stringify({
+                content: `**[${rule.rule_type.replace(/_/g, " ")}]** ${message}`,
+                username: "Sentinel",
+            })
+            : JSON.stringify({
                 event: "alert",
                 ruleId: rule.id,
                 targetId,
                 alertType: rule.rule_type,
                 message,
                 timestamp: now,
-            }),
+            });
+
+        fetch(config.alertWebhookUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+        }).then(async (res) => {
+            if (!res.ok) {
+                const text = await res.text().catch(() => "");
+                log.warn(`Webhook delivery failed: HTTP ${res.status} — ${text.slice(0, 200)}`);
+            }
         }).catch(err => log.warn(`Webhook delivery failed: ${err.message}`));
     }
 }
