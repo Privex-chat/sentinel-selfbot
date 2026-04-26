@@ -231,7 +231,7 @@ async function analyzeAllRelationships(targetId: string): Promise<void> {
             if (confidence >= 0.2 && ai.isAvailable()) {
                 try {
                     const prompt = relationshipClassificationPrompt(features);
-                    const raw = await ai.complete(SYSTEM_PROMPT, prompt, 1024);
+                    const raw = await ai.complete(SYSTEM_PROMPT, prompt, 2048);
                     const result = extractJsonObject(raw);
                     classification = (result.classification as string) || "unknown";
                     reasoning = Array.isArray(result.reasoning) ? result.reasoning as string[] : [];

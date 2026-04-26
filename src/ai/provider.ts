@@ -152,6 +152,10 @@ export class GeminiProvider implements AIProvider {
         const model = config.aiModel || "gemini-2.0-flash";
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.aiApiKey}`;
 
+        // For thinking models (gemini-2.5-*), disable the internal reasoning
+        // budget entirely. These tasks emit short structured JSON — thinking
+        // wastes tokens and causes MAX_TOKENS truncation on the actual output.
+        const isThinkingModel = model.includes("2.5");
         const body = JSON.stringify({
             system_instruction: {
                 parts: [{ text: systemPrompt }],
@@ -165,6 +169,7 @@ export class GeminiProvider implements AIProvider {
             generationConfig: {
                 maxOutputTokens: maxTokens,
                 temperature: 0.1,
+                ...(isThinkingModel ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
             },
         });
 
