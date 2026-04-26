@@ -8,7 +8,7 @@ import { handleProfileUpdate } from "../collectors/profile";
 
 const log = createLogger("BackfillEngine");
 
-const BACKFILL_DELAY_MS = 1000;
+const BACKFILL_DELAY_MS = 500;
 const MAX_CONCURRENT_TARGETS = 3;
 const MAX_CONCURRENT_GUILDS = 2;
 
