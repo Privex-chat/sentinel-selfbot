@@ -3,6 +3,7 @@ import { getDb } from "../database/connection";
 import { getStmts } from "../database/queries";
 import { ai } from "../ai/provider";
 import { RelationshipFeatures, relationshipClassificationPrompt } from "../ai/prompts";
+import { extractJsonObject } from "../ai/json-extract";
 import { buildSocialGraph } from "./social-graph";
 import { config } from "../utils/config";
 
@@ -230,10 +231,10 @@ async function analyzeAllRelationships(targetId: string): Promise<void> {
             if (confidence >= 0.2 && ai.isAvailable()) {
                 try {
                     const prompt = relationshipClassificationPrompt(features);
-                    const raw = await ai.complete(SYSTEM_PROMPT, prompt, 256);
-                    const result = JSON.parse(raw);
-                    classification = result.classification || "unknown";
-                    reasoning = Array.isArray(result.reasoning) ? result.reasoning : [];
+                    const raw = await ai.complete(SYSTEM_PROMPT, prompt, 512);
+                    const result = extractJsonObject(raw);
+                    classification = (result.classification as string) || "unknown";
+                    reasoning = Array.isArray(result.reasoning) ? result.reasoning as string[] : [];
                 } catch (err: any) {
                     log.warn(`LLM classification failed for ${targetId}↔${otherUserId}: ${err.message}`);
                     classification = "unknown";

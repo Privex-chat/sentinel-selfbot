@@ -2,6 +2,7 @@ import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
 import { ai } from "../ai/provider";
 import { messageCategoryPrompt } from "../ai/prompts";
+import { extractJsonArray } from "../ai/json-extract";
 import { config } from "../utils/config";
 
 const log = createLogger("Categorizer");
@@ -34,9 +35,8 @@ export async function categorizeUncategorizedBatch(targetId: string): Promise<nu
     try {
         const prompt = messageCategoryPrompt(messages);
         const raw = await ai.complete(SYSTEM_PROMPT, prompt, 1024);
-        const parsed = JSON.parse(raw);
-        if (!Array.isArray(parsed)) throw new Error("Response is not an array");
-        results = parsed;
+        const parsed = extractJsonArray(raw);
+        results = parsed as { id: string; category: string; confidence: number }[];
     } catch (err: any) {
         log.warn(`Categorization parse error for ${targetId}: ${err.message}`);
         // Fallback: mark all as "general"
