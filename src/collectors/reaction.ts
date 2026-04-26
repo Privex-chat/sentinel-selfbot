@@ -1,5 +1,6 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
+import { pushSSEEvent } from "../api/routes/events";
 
 const log = createLogger("Reaction");
 
@@ -26,6 +27,13 @@ export function handleReactionAdd(
     });
     stmts.insertEvent.run(targetId, "REACTION_ADD", now, eventData, guildId, channelId);
 
+    pushSSEEvent({
+        target_id: targetId,
+        event_type: "REACTION_ADD",
+        timestamp: now,
+        data: { messageId, channelId, guildId, messageAuthorId, emoji: emoji.name, emojiId: emoji.id || null, isCustom },
+    });
+
     log.debug(`${targetId}: reacted ${emoji.name} on ${messageId}`);
 }
 
@@ -46,6 +54,13 @@ export function handleReactionRemove(
         emoji: emoji.name, emojiId: emoji.id || null,
     });
     stmts.insertEvent.run(targetId, "REACTION_REMOVE", now, eventData, guildId, channelId);
+
+    pushSSEEvent({
+        target_id: targetId,
+        event_type: "REACTION_REMOVE",
+        timestamp: now,
+        data: { messageId, channelId, guildId, emoji: emoji.name, emojiId: emoji.id || null },
+    });
 
     log.debug(`${targetId}: un-reacted ${emoji.name} on ${messageId}`);
 }

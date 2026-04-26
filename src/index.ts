@@ -60,36 +60,22 @@ function isTarget(userId: string): boolean {
     return target?.active === 1;
 }
 
-/**
- * Write the current timestamp into heartbeat_log every 60 s.
- * On an unclean exit, the most recent entry tells us when the process was last
- * definitely alive, giving us a more accurate close-timestamp for stale sessions.
- */
 function startHeartbeatLogger(): void {
-    const INTERVAL = 60_000; // 1 minute
+    const INTERVAL = 60_000;
     heartbeatInterval = setInterval(() => {
         try {
             const stmts = getStmts();
             stmts.insertHeartbeat.run(Date.now());
-            stmts.pruneHeartbeats.run(); // keep the table small
+            stmts.pruneHeartbeats.run();
         } catch { /* non-fatal */ }
     }, INTERVAL);
     log.info("Heartbeat logger started (60 s interval)");
 }
 
-/**
- * Close any sessions that are still open from a previous run.
- *
- * In a clean shutdown these are already closed.  After a crash or force-kill
- * we fall back to the last heartbeat timestamp (most accurate) or, if the
- * heartbeat log is empty, to the current time.
- */
 function closeStaleOpenSessions(): void {
     const db  = getDb();
     const now = Date.now();
 
-    // Prefer the last heartbeat timestamp — it reflects when the process was
-    // last alive rather than the (potentially much later) restart time.
     let closeAt = now;
     try {
         const stmts = getStmts();
@@ -98,7 +84,7 @@ function closeStaleOpenSessions(): void {
             closeAt = row.timestamp;
             log.info(`Using last heartbeat timestamp for stale session close: ${new Date(closeAt).toISOString()}`);
         }
-    } catch { /* heartbeat_log may not exist on very first run */ }
+    } catch { }
 
     const presenceChanges = db
         .prepare("UPDATE presence_sessions  SET end_time = ?, duration_ms = ? - start_time WHERE end_time IS NULL")
@@ -150,8 +136,6 @@ function requestInitialPresences(client: GatewayClient): void {
         return;
     }
 
-    // Batch up to 100 user-ids per guild, then stagger each batch 600 ms apart
-    // to stay well inside the 120 ops / 60 s gateway rate limit.
     const batches: { guildId: string; userIds: string[] }[] = [];
     for (const [guildId, userIds] of guildTargetMap) {
         for (let i = 0; i < userIds.length; i += 100) {
@@ -178,26 +162,32 @@ function setupGatewayHandlers(client: GatewayClient): void {
             switch (eventName) {
 
                 // ── Presence ───────────────────────────────────────────────────
+                // handlePresenceUpdate now pushes processed SSE events directly.
+                // handleActivityUpdate now pushes SSE for activity changes.
                 case "PRESENCE_UPDATE": {
                     const userId = data.user?.id;
                     if (!userId || !isTarget(userId)) break;
                     handlePresenceUpdate(userId, data);
-                    // Always pass activities array — empty array closes running sessions when user goes offline
                     handleActivityUpdate(userId, data.activities || []);
-                    pushEvent(userId, "PRESENCE_UPDATE", data);
                     break;
                 }
 
                 // ── Messages ───────────────────────────────────────────────────
+                // Keep pushing raw Discord message data — the live feed needs
+                // `content` which isn't in the processed event data.
                 case "MESSAGE_CREATE": {
                     const authorId = data.author?.id;
                     if (!authorId || !isTarget(authorId)) break;
                     if (data.author.bot) break;
                     log.info(`MESSAGE_CREATE from tracked target ${authorId} in guild ${data.guild_id || "DM"}`);
                     const msgEventData = handleMessageCreate(authorId, data, data.guild_id || null, "live");
-                    // evaluateEvent uses the processed camelCase eventData, not the raw Discord payload
                     evaluateEvent("MESSAGE_CREATE", authorId, msgEventData);
-                    pushEvent(authorId, "MESSAGE_CREATE", data);
+                    pushSSEEvent({
+                        target_id:  authorId,
+                        event_type: "MESSAGE_CREATE",
+                        timestamp:  Date.now(),
+                        data,
+                    });
                     break;
                 }
 
@@ -205,52 +195,73 @@ function setupGatewayHandlers(client: GatewayClient): void {
                     const authorId = data.author?.id;
                     if (!authorId || !isTarget(authorId)) break;
                     handleMessageUpdate(authorId, data, data.guild_id || null);
-                    pushEvent(authorId, "MESSAGE_UPDATE", data);
+                    pushSSEEvent({
+                        target_id:  authorId,
+                        event_type: "MESSAGE_UPDATE",
+                        timestamp:  Date.now(),
+                        data,
+                    });
                     break;
                 }
 
                 case "MESSAGE_DELETE": {
                     const deletedTargetId = handleMessageDelete(data.id, data.channel_id, data.guild_id || null);
-                    if (deletedTargetId) pushEvent(deletedTargetId, "MESSAGE_DELETE", data);
+                    if (deletedTargetId) {
+                        pushSSEEvent({
+                            target_id:  deletedTargetId,
+                            event_type: "MESSAGE_DELETE",
+                            timestamp:  Date.now(),
+                            data,
+                        });
+                    }
                     break;
                 }
 
                 // ── Typing ─────────────────────────────────────────────────────
+                // GHOST_TYPE SSE is pushed inside the typing collector's timeout.
                 case "TYPING_START": {
                     const userId = data.user_id;
                     if (!userId || !isTarget(userId)) break;
                     handleTypingStart(userId, data.channel_id, data.guild_id || null);
-                    pushEvent(userId, "TYPING_START", data);
+                    pushSSEEvent({
+                        target_id:  userId,
+                        event_type: "TYPING_START",
+                        timestamp:  Date.now(),
+                        data,
+                    });
                     break;
                 }
 
                 // ── Voice ──────────────────────────────────────────────────────
+                // handleVoiceStateUpdate now pushes semantic VOICE_JOIN/LEAVE/MOVE/
+                // STATE_CHANGE events to SSE directly.
                 case "VOICE_STATE_UPDATE": {
                     const userId = data.user_id;
                     if (!userId || !isTarget(userId)) break;
                     handleVoiceStateUpdate(userId, data);
-                    pushEvent(userId, "VOICE_STATE_UPDATE", data);
                     break;
                 }
 
                 // ── Profile ────────────────────────────────────────────────────
+                // handleProfileUpdate now pushes PROFILE_UPDATE/AVATAR_CHANGE/
+                // USERNAME_CHANGE to SSE directly.
                 case "USER_UPDATE": {
                     const userId = data.id;
                     if (!userId || !isTarget(userId)) break;
                     handleProfileUpdate(userId, data);
-                    pushEvent(userId, "USER_UPDATE", data);
                     break;
                 }
 
+                // handleGuildMemberUpdate now pushes NICKNAME_CHANGE/ROLE_ADD/REMOVE to SSE.
                 case "GUILD_MEMBER_UPDATE": {
                     const userId = data.user?.id;
                     if (!userId || !isTarget(userId)) break;
                     handleGuildMemberUpdate(userId, data.guild_id, data);
-                    pushEvent(userId, "GUILD_MEMBER_UPDATE", data);
                     break;
                 }
 
                 // ── Reactions ──────────────────────────────────────────────────
+                // handleReactionAdd/Remove now push REACTION_ADD/REMOVE to SSE.
                 case "MESSAGE_REACTION_ADD": {
                     const userId = data.user_id;
                     if (!userId || !isTarget(userId)) break;
@@ -260,7 +271,6 @@ function setupGatewayHandlers(client: GatewayClient): void {
                         data.channel_id, data.guild_id || null,
                         data.emoji
                     );
-                    pushEvent(userId, "MESSAGE_REACTION_ADD", data);
                     break;
                 }
 
@@ -272,25 +282,18 @@ function setupGatewayHandlers(client: GatewayClient): void {
                         data.channel_id, data.guild_id || null,
                         data.emoji
                     );
-                    pushEvent(userId, "MESSAGE_REACTION_REMOVE", data);
                     break;
                 }
 
                 // ── DM detection ───────────────────────────────────────────────
+                // handleChannelCreate now pushes DM_CHANNEL_OPENED to SSE.
                 case "CHANNEL_CREATE": {
                     handleChannelCreate(data, isTarget);
                     break;
                 }
 
                 // ── Guild members chunk ────────────────────────────────────────
-                // This is the response to REQUEST_GUILD_MEMBERS.
-                //
-                // KEY FIX: Discord only includes *non-offline* users in the
-                // `presences` array.  Users present in `members` but absent
-                // from `presences` are therefore offline.  We must handle both
-                // cases explicitly so stale "online" state is cleared.
                 case "GUILD_MEMBERS_CHUNK": {
-                    // Build a fast lookup: userId → presence data
                     const presenceMap = new Map<string, any>();
                     for (const presence of data.presences || []) {
                         const uid: string | undefined = presence.user?.id;
@@ -301,13 +304,11 @@ function setupGatewayHandlers(client: GatewayClient): void {
                         const userId: string | undefined = member.user?.id;
                         if (!userId || !isTarget(userId)) continue;
 
-                        // Always keep profile snapshot up-to-date
                         if (member.user) handleProfileUpdate(userId, member.user);
 
                         const presence = presenceMap.get(userId);
 
                         if (presence) {
-                            // ── User is online / idle / dnd ───────────────────
                             const existing = getCurrentPresence(userId);
                             if (!existing) {
                                 initPresence(userId, presence);
@@ -322,23 +323,16 @@ function setupGatewayHandlers(client: GatewayClient): void {
                                 }
                             }
                         } else {
-                            // ── User absent from presences → offline ──────────
-                            // Discord omits offline users from the presences
-                            // array, so absence is authoritative evidence of
-                            // an offline state.
                             const existing = getCurrentPresence(userId);
                             if (!existing) {
-                                // First time we see this target — record offline
                                 initPresence(userId, { status: "offline", client_status: null });
                                 log.info(`Initialised presence for ${userId}: offline (not in chunk)`);
                             } else if (existing.status !== "offline") {
-                                // Was previously tracked as active — correct it
                                 log.info(
                                     `${userId}: absent from guild chunk presences — ` +
                                     `correcting ${existing.status} → offline`
                                 );
                                 handlePresenceUpdate(userId, { status: "offline", client_status: null });
-                                // Close any open activities (Spotify, games, etc.)
                                 handleActivityUpdate(userId, []);
                             }
                         }
@@ -365,35 +359,8 @@ function setupGatewayHandlers(client: GatewayClient): void {
             client.requestGuildMembers(guildId, userIds)
         );
 
-        // Give the gateway 2 s to settle before flooding it with member requests
         setTimeout(() => requestInitialPresences(client), 2_000);
     });
-}
-
-// ── SSE + alert forwarding ────────────────────────────────────────────────────
-
-// Event types whose alert evaluation is handled directly by their collector
-// with properly-shaped data. Calling evaluateEvent here with raw Discord
-// payloads would either mismatch field names or double-fire.
-const COLLECTOR_EVALUATED_EVENTS = new Set([
-    "PRESENCE_UPDATE",   // presence.ts — uses newStatus/oldStatus shape
-    "VOICE_STATE_UPDATE", // voice.ts — emits VOICE_JOIN/VOICE_LEAVE directly
-    "TYPING_START",       // typing.ts — GHOST_TYPE fired from timeout callback
-    "MESSAGE_CREATE",     // message.ts — evaluates with processed camelCase eventData
-]);
-
-function pushEvent(targetId: string, eventType: string, data: any): void {
-    const event = {
-        target_id:  targetId,
-        event_type: eventType,
-        timestamp:  Date.now(),
-        data,
-    };
-    pushSSEEvent(event);
-    // Skip evaluateEvent for events whose collectors already call it with correct data
-    if (!COLLECTOR_EVALUATED_EVENTS.has(eventType)) {
-        evaluateEvent(eventType, targetId, JSON.stringify(data));
-    }
 }
 
 // ── Voice participant tracker ─────────────────────────────────────────────────
@@ -416,12 +383,12 @@ function startVoiceParticipantTracker(client: GatewayClient): void {
 function shutdown(): void {
     log.info("Shutting down…");
 
-    if (dailySummaryInterval)    clearInterval(dailySummaryInterval);
+    if (dailySummaryInterval)     clearInterval(dailySummaryInterval);
     if (voiceParticipantInterval) clearInterval(voiceParticipantInterval);
-    if (heartbeatInterval)       clearInterval(heartbeatInterval);
-    if (aiAnalysisInterval)      clearInterval(aiAnalysisInterval);
-    if (digestHandle)            clearInterval(digestHandle);
-    if (briefHandle)             clearTimeout(briefHandle);
+    if (heartbeatInterval)        clearInterval(heartbeatInterval);
+    if (aiAnalysisInterval)       clearInterval(aiAnalysisInterval);
+    if (digestHandle)             clearInterval(digestHandle);
+    if (briefHandle)              clearTimeout(briefHandle);
 
     stopProfilePoller();
     stopStatusPoller();
@@ -464,7 +431,6 @@ async function main(): Promise<void> {
     initDatabase();
     runMigrations();
 
-    // Cloud mode: hydrate SQLite from Supabase before anything else
     if (config.dbMode === "cloud") {
         try {
             await hydrateFromSupabase();
@@ -490,7 +456,6 @@ async function main(): Promise<void> {
         });
     });
 
-    // Supabase sync
     supabaseSync = initSupabaseSync();
     if (supabaseSync.enabled) {
         supabaseSync.testConnection()
@@ -511,15 +476,12 @@ async function main(): Promise<void> {
 
     await startApiServer();
 
-    // Heartbeat logger — must start after DB is initialised
     startHeartbeatLogger();
 
-    // Gateway
     gateway = new GatewayClient();
     setupGatewayHandlers(gateway);
     await gateway.connect();
 
-    // Pollers
     startProfilePoller();
     startStatusPoller();
     startMutualServersPoller();
@@ -527,7 +489,6 @@ async function main(): Promise<void> {
 
     startVoiceParticipantTracker(gateway);
 
-    // Daily summaries + baseline computation + alert fire count reset
     dailySummaryInterval = setInterval(() => {
         try { computeDailySummaries(); }
         catch (err: any) { log.error(`Daily summary error: ${err.message}`); }
@@ -537,20 +498,15 @@ async function main(): Promise<void> {
         catch (err: any) { log.error(`Alert fire count reset error: ${err.message}`); }
     }, withJitter(config.dailySummaryIntervalMs));
 
-    // Run first summary + baselines after 2 minutes
     setTimeout(() => {
         try { computeDailySummaries(); } catch { /* non-fatal */ }
         try { runAllBaselineComputation(); } catch { /* non-fatal */ }
     }, 120_000);
 
-    // Brief scheduler
     briefHandle = scheduleBriefGeneration();
 
-    // Digest flusher — always start so per-rule digest_mode=1 rules are flushed
-    // even when global alertDigestMode is off. No-op when buffer is empty.
     digestHandle = startDigestFlusher();
 
-    // Backfill on startup (targets with no backfill data)
     if (config.backfillEnabled) {
         setTimeout(() => {
             startBackfillOnStartup().catch(err =>
@@ -559,9 +515,7 @@ async function main(): Promise<void> {
         }, 120_000);
     }
 
-    // AI analysis loop
     if (config.aiProvider !== "none") {
-        // Delayed first run: 10 minutes after startup
         setTimeout(async () => {
             try {
                 await runAllBaselineComputation();

@@ -1,5 +1,6 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
+import { pushSSEEvent } from "../api/routes/events";
 
 const log = createLogger("GuildMember");
 
@@ -34,6 +35,12 @@ export function handleGuildMemberUpdate(targetId: string, guildId: string, data:
                 guildId, oldNick: cached.nick, newNick,
             });
             stmts.insertEvent.run(targetId, "NICKNAME_CHANGE", now, eventData, guildId, null);
+            pushSSEEvent({
+                target_id: targetId,
+                event_type: "NICKNAME_CHANGE",
+                timestamp: now,
+                data: { guildId, oldNick: cached.nick, newNick },
+            });
             log.info(`${targetId}: nickname in ${guildId}: "${cached.nick}" -> "${newNick}"`);
         }
 
@@ -48,6 +55,12 @@ export function handleGuildMemberUpdate(targetId: string, guildId: string, data:
                 );
                 const eventData = JSON.stringify({ guildId, roleId: role });
                 stmts.insertEvent.run(targetId, "ROLE_ADD", now, eventData, guildId, null);
+                pushSSEEvent({
+                    target_id: targetId,
+                    event_type: "ROLE_ADD",
+                    timestamp: now,
+                    data: { guildId, roleId: role },
+                });
                 log.debug(`${targetId}: role added ${role} in ${guildId}`);
             }
         }
@@ -59,6 +72,12 @@ export function handleGuildMemberUpdate(targetId: string, guildId: string, data:
                 );
                 const eventData = JSON.stringify({ guildId, roleId: role });
                 stmts.insertEvent.run(targetId, "ROLE_REMOVE", now, eventData, guildId, null);
+                pushSSEEvent({
+                    target_id: targetId,
+                    event_type: "ROLE_REMOVE",
+                    timestamp: now,
+                    data: { guildId, roleId: role },
+                });
                 log.debug(`${targetId}: role removed ${role} in ${guildId}`);
             }
         }

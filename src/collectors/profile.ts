@@ -1,6 +1,7 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
 import { evaluateEvent } from "../alerts/engine";
+import { pushSSEEvent } from "../api/routes/events";
 
 const log = createLogger("Profile");
 
@@ -32,14 +33,12 @@ export function handleProfileUpdate(targetId: string, userData: any, profileData
         if (lastSnapshot.pronouns !== pronouns && pronouns !== null) changes.push(`pronouns: ${lastSnapshot.pronouns} -> ${pronouns}`);
         if (lastSnapshot.discriminator !== discriminator && discriminator) changes.push(`discriminator: ${lastSnapshot.discriminator} -> ${discriminator}`);
 
-        // Connected accounts diff
         if (connectedAccountsJson && lastSnapshot.connected_accounts) {
             try {
                 const oldAccounts = JSON.parse(lastSnapshot.connected_accounts);
                 const newAccounts = connectedAccounts || [];
                 const oldTypes = new Set(oldAccounts.map((a: any) => a.type));
                 const newTypes = new Set(newAccounts.map((a: any) => a.type));
-
                 for (const t of newTypes) {
                     if (!oldTypes.has(t)) changes.push(`connected: ${t}`);
                 }
@@ -63,16 +62,34 @@ export function handleProfileUpdate(targetId: string, userData: any, profileData
             const eventData = JSON.stringify({ changes });
             stmts.insertEvent.run(targetId, "PROFILE_UPDATE", now, eventData, null, null);
             evaluateEvent("PROFILE_UPDATE", targetId, eventData, now);
+            pushSSEEvent({
+                target_id: targetId,
+                event_type: "PROFILE_UPDATE",
+                timestamp: now,
+                data: { changes },
+            });
 
             if (changes.some(c => c.includes("avatar"))) {
                 const avatarData = JSON.stringify({ oldHash: lastSnapshot?.avatar_hash, newHash: avatarHash });
                 stmts.insertEvent.run(targetId, "AVATAR_CHANGE", now, avatarData, null, null);
                 evaluateEvent("AVATAR_CHANGE", targetId, avatarData, now);
+                pushSSEEvent({
+                    target_id: targetId,
+                    event_type: "AVATAR_CHANGE",
+                    timestamp: now,
+                    data: { oldHash: lastSnapshot?.avatar_hash, newHash: avatarHash },
+                });
             }
             if (changes.some(c => c.includes("username"))) {
                 const usernameData = JSON.stringify({ old: lastSnapshot?.username, new: username });
                 stmts.insertEvent.run(targetId, "USERNAME_CHANGE", now, usernameData, null, null);
                 evaluateEvent("USERNAME_CHANGE", targetId, usernameData, now);
+                pushSSEEvent({
+                    target_id: targetId,
+                    event_type: "USERNAME_CHANGE",
+                    timestamp: now,
+                    data: { old: lastSnapshot?.username, new: username },
+                });
             }
 
             log.info(`${targetId}: profile updated - ${changes.join(", ")}`);

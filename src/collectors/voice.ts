@@ -1,6 +1,7 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
 import { evaluateEvent } from "../alerts/engine";
+import { pushSSEEvent } from "../api/routes/events";
 
 const log = createLogger("Voice");
 
@@ -42,12 +43,18 @@ export function handleVoiceStateUpdate(targetId: string, data: any): void {
             closeVoiceSession(targetId, current, now);
             currentVoiceState.delete(targetId);
 
-            const eventData = JSON.stringify({
+            const leaveData = JSON.stringify({
                 guildId: current.guildId,
                 channelId: current.channelId,
             });
-            stmts.insertEvent.run(targetId, "VOICE_LEAVE", now, eventData, current.guildId, current.channelId);
-            evaluateEvent("VOICE_LEAVE", targetId, eventData, now);
+            stmts.insertEvent.run(targetId, "VOICE_LEAVE", now, leaveData, current.guildId, current.channelId);
+            evaluateEvent("VOICE_LEAVE", targetId, leaveData, now);
+            pushSSEEvent({
+                target_id: targetId,
+                event_type: "VOICE_LEAVE",
+                timestamp: now,
+                data: { guildId: current.guildId, channelId: current.channelId },
+            });
             log.debug(`${targetId}: left voice ${current.channelId}`);
         }
         return;
@@ -63,12 +70,23 @@ export function handleVoiceStateUpdate(targetId: string, data: any): void {
             guildId,
         });
         stmts.insertEvent.run(targetId, "VOICE_MOVE", now, moveData, guildId, newChannelId);
+        pushSSEEvent({
+            target_id: targetId,
+            event_type: "VOICE_MOVE",
+            timestamp: now,
+            data: { fromChannel: current.channelId, toChannel: newChannelId, guildId },
+        });
         log.debug(`${targetId}: moved voice ${current.channelId} -> ${newChannelId}`);
 
-        // Open new session and treat destination as a join for alert purposes
         openVoiceSession(targetId, guildId, newChannelId, null, now, selfMute, selfDeaf, serverMute, serverDeaf, streaming);
         const joinData = JSON.stringify({ guildId, channelId: newChannelId });
         evaluateEvent("VOICE_JOIN", targetId, joinData, now);
+        pushSSEEvent({
+            target_id: targetId,
+            event_type: "VOICE_JOIN",
+            timestamp: now,
+            data: { guildId, channelId: newChannelId },
+        });
         return;
     }
 
@@ -76,9 +94,15 @@ export function handleVoiceStateUpdate(targetId: string, data: any): void {
     if (!current) {
         openVoiceSession(targetId, guildId, newChannelId, null, now, selfMute, selfDeaf, serverMute, serverDeaf, streaming);
 
-        const eventData = JSON.stringify({ guildId, channelId: newChannelId });
-        stmts.insertEvent.run(targetId, "VOICE_JOIN", now, eventData, guildId, newChannelId);
-        evaluateEvent("VOICE_JOIN", targetId, eventData, now);
+        const joinData = JSON.stringify({ guildId, channelId: newChannelId });
+        stmts.insertEvent.run(targetId, "VOICE_JOIN", now, joinData, guildId, newChannelId);
+        evaluateEvent("VOICE_JOIN", targetId, joinData, now);
+        pushSSEEvent({
+            target_id: targetId,
+            event_type: "VOICE_JOIN",
+            timestamp: now,
+            data: { guildId, channelId: newChannelId },
+        });
         log.debug(`${targetId}: joined voice ${newChannelId}`);
         return;
     }
@@ -100,11 +124,17 @@ export function handleVoiceStateUpdate(targetId: string, data: any): void {
                 streaming ? 1 : 0, current.dbSessionId
             );
 
-            const eventData = JSON.stringify({
+            const stateData = JSON.stringify({
                 channelId: newChannelId, guildId, changes,
                 selfMute, selfDeaf, serverMute, serverDeaf, streaming,
             });
-            stmts.insertEvent.run(targetId, "VOICE_STATE_CHANGE", now, eventData, guildId, newChannelId);
+            stmts.insertEvent.run(targetId, "VOICE_STATE_CHANGE", now, stateData, guildId, newChannelId);
+            pushSSEEvent({
+                target_id: targetId,
+                event_type: "VOICE_STATE_CHANGE",
+                timestamp: now,
+                data: { channelId: newChannelId, guildId, changes, selfMute, selfDeaf, serverMute, serverDeaf, streaming },
+            });
             log.debug(`${targetId}: voice state change - ${changes.join(", ")}`);
         }
 

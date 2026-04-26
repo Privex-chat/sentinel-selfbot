@@ -1,6 +1,7 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
 import { evaluateEvent } from "../alerts/engine";
+import { pushSSEEvent } from "../api/routes/events";
 
 const log = createLogger("Typing");
 
@@ -8,6 +9,8 @@ interface PendingTyping {
     rowId: number;
     timeout: NodeJS.Timeout;
     timestamp: number;
+    channelId: string;
+    guildId: string | null;
 }
 
 const pendingTyping: Map<string, PendingTyping> = new Map();
@@ -48,9 +51,17 @@ export function handleTypingStart(targetId: string, channelId: string, guildId: 
         const eventData = JSON.stringify({ channelId, guildId, ghost: true });
         stmts.insertEvent.run(targetId, "GHOST_TYPE", ghostNow, eventData, guildId, channelId);
         evaluateEvent("GHOST_TYPE", targetId, eventData, ghostNow);
+
+        // Push ghost type to live SSE feed
+        pushSSEEvent({
+            target_id: targetId,
+            event_type: "GHOST_TYPE",
+            timestamp: ghostNow,
+            data: { channelId, guildId, ghost: true },
+        });
     }, GHOST_TIMEOUT_MS);
 
-    pendingTyping.set(key, { rowId, timeout, timestamp: now });
+    pendingTyping.set(key, { rowId, timeout, timestamp: now, channelId, guildId });
     log.debug(`${targetId}: typing in ${channelId}`);
 }
 

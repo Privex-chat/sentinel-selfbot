@@ -5,6 +5,52 @@ import { pushSSEEvent } from "../api/routes/events";
 
 const log = createLogger("AlertDigest");
 
+const DISCORD_RE = /https?:\/\/(?:discord\.com|discordapp\.com)\/api\/webhooks\//i;
+
+async function sendDigestWebhook(entries: DigestEntry[]): Promise<void> {
+    if (!config.alertWebhookUrl) return;
+
+    const isDiscord = DISCORD_RE.test(config.alertWebhookUrl);
+    const lines = entries.map(e =>
+        e.count > 1
+            ? `**[${e.alertType.replace(/_/g, " ")}]** (×${e.count}) ${e.message}`
+            : `**[${e.alertType.replace(/_/g, " ")}]** ${e.message}`
+    );
+
+    const body = isDiscord
+        ? JSON.stringify({
+            username: "Sentinel",
+            content: `**[DIGEST — ${entries.length} alert${entries.length === 1 ? "" : "s"}]**\n${lines.join("\n")}`.slice(0, 2000),
+        })
+        : JSON.stringify({
+            event: "alert_digest",
+            alerts: entries.map(e => ({
+                ruleId: e.ruleId,
+                targetId: e.targetId,
+                alertType: e.alertType,
+                message: e.message,
+                count: e.count,
+            })),
+            timestamp: Date.now(),
+        });
+
+    try {
+        const res = await fetch(config.alertWebhookUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+        });
+        if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            log.warn(`Digest webhook failed: HTTP ${res.status} — ${text.slice(0, 200)}`);
+        } else {
+            log.info(`Digest webhook delivered (${entries.length} alerts)`);
+        }
+    } catch (err: any) {
+        log.warn(`Digest webhook error: ${err.message}`);
+    }
+}
+
 interface DigestEntry {
     ruleId: number;
     targetId: string;
@@ -38,6 +84,7 @@ function flushDigest(): void {
 
     const stmts = getStmts();
     const now = Date.now();
+    const allEntries: DigestEntry[] = [];
 
     // Group by target
     const byTarget = new Map<string, DigestEntry[]>();
@@ -45,6 +92,7 @@ function flushDigest(): void {
         const arr = byTarget.get(entry.targetId) || [];
         arr.push(entry);
         byTarget.set(entry.targetId, arr);
+        allEntries.push(entry);
     }
 
     for (const [targetId, entries] of byTarget) {
@@ -70,6 +118,9 @@ function flushDigest(): void {
     }
 
     digestBuffer.clear();
+
+    // Send one webhook call covering all buffered alerts
+    sendDigestWebhook(allEntries).catch(() => {});
 }
 
 export function startDigestFlusher(): NodeJS.Timeout {

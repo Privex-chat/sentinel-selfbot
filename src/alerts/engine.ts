@@ -84,23 +84,38 @@ export function evaluateEvent(
     const alertTypes = EVENT_TO_ALERT_MAP[eventType];
     if (!alertTypes) return;
 
+    log.info(`evaluateEvent: ${eventType} target=${targetId} rules=${cachedRules.length} digestMode=${config.alertDigestMode}`);
+
     const ts = eventTimestamp || Date.now();
 
     for (const rule of cachedRules) {
-        if (rule.target_id && rule.target_id !== targetId) continue;
+        // Normalise to string — SQLite may return target_id as number if stored without TEXT affinity
+        const ruleTarget = rule.target_id != null ? String(rule.target_id) : null;
 
-        // Fatigue suppression
-        if (rule.auto_suppressed === 1) continue;
+        if (ruleTarget && ruleTarget !== targetId) {
+            log.info(`  rule ${rule.id} (${rule.rule_type}): skip — ruleTarget="${ruleTarget}" != "${targetId}"`);
+            continue;
+        }
 
-        // Composite rule handling
+        if (rule.auto_suppressed === 1) {
+            log.info(`  rule ${rule.id} (${rule.rule_type}): skip — auto_suppressed`);
+            continue;
+        }
+
         if (rule.composite_condition) {
+            log.info(`  rule ${rule.id} (${rule.rule_type}): composite — delegating`);
             handleCompositeRule(rule, eventType, targetId, eventData, ts);
             continue;
         }
 
-        if (!alertTypes.includes(rule.rule_type)) continue;
+        if (!alertTypes.includes(rule.rule_type)) {
+            log.info(`  rule ${rule.id} (${rule.rule_type}): skip — rule_type not in alertTypes [${alertTypes.join(",")}]`);
+            continue;
+        }
 
-        if (matchesCondition(rule, eventType, eventData, ts, targetId)) {
+        const matched = matchesCondition(rule, eventType, eventData, ts, targetId);
+        log.info(`  rule ${rule.id} (${rule.rule_type}): matchesCondition=${matched}`);
+        if (matched) {
             routeAlert(rule, targetId, eventType, eventData);
         }
     }

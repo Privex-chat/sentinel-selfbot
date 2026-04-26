@@ -3,13 +3,13 @@ import { config } from "../utils/config";
 import { withJitter } from "../utils/jitter";
 import { discordFetch } from "../utils/rate-limiter";
 import { getStmts } from "../database/queries";
+import { pushSSEEvent } from "../api/routes/events";
 
 const log = createLogger("MutualServers");
 
 let intervalHandle: NodeJS.Timeout | null = null;
 const POLL_INTERVAL_BASE = 1_800_000; // 30 minutes
 
-// In-memory cache: prevents re-emitting same SERVER_JOIN/LEAVE every 30 min
 const lastKnownGuildIds = new Map<string, Set<string>>();
 
 async function pollTarget(targetId: string): Promise<void> {
@@ -29,7 +29,6 @@ async function pollTarget(targetId: string): Promise<void> {
         const stmts = getStmts();
         const now   = Date.now();
 
-        // Seed cache from DB snapshot on first poll for this target
         if (!lastKnownGuildIds.has(targetId)) {
             const lastSnapshot = stmts.getLatestSnapshot.get(targetId) as any;
             let seedGuilds: { id: string }[] = [];
@@ -46,6 +45,12 @@ async function pollTarget(targetId: string): Promise<void> {
             if (!oldIds.has(guild.id)) {
                 stmts.insertEvent.run(targetId, "SERVER_JOIN", now, JSON.stringify({ guildId: guild.id }), guild.id, null);
                 stmts.insertGuildMemberEvent.run(targetId, guild.id, "SERVER_JOIN", now, null, null);
+                pushSSEEvent({
+                    target_id: targetId,
+                    event_type: "SERVER_JOIN",
+                    timestamp: now,
+                    data: { guildId: guild.id },
+                });
                 log.info(`${targetId}: joined server ${guild.id}`);
             }
         }
@@ -54,11 +59,16 @@ async function pollTarget(targetId: string): Promise<void> {
             if (!newIds.has(id)) {
                 stmts.insertEvent.run(targetId, "SERVER_LEAVE", now, JSON.stringify({ guildId: id }), id, null);
                 stmts.insertGuildMemberEvent.run(targetId, id, "SERVER_LEAVE", now, null, null);
+                pushSSEEvent({
+                    target_id: targetId,
+                    event_type: "SERVER_LEAVE",
+                    timestamp: now,
+                    data: { guildId: id },
+                });
                 log.info(`${targetId}: left server ${id}`);
             }
         }
 
-        // Update cache so next poll diffs against current state
         lastKnownGuildIds.set(targetId, newIds);
     } catch (err: any) {
         log.error(`Mutual servers poll error for ${targetId}: ${err.message}`);

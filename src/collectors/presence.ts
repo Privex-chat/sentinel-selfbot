@@ -1,6 +1,7 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
 import { evaluateEvent } from "../alerts/engine";
+import { pushSSEEvent } from "../api/routes/events";
 
 const log = createLogger("Presence");
 
@@ -24,7 +25,6 @@ export function getCurrentPresence(targetId: string): PresenceState | undefined 
     return currentPresence.get(targetId);
 }
 
-/** Returns true if the given status counts as "active" (online / idle / dnd). */
 export function isActiveStatus(status: string): boolean {
     return status === "online" || status === "idle" || status === "dnd";
 }
@@ -40,7 +40,7 @@ export function handlePresenceUpdate(targetId: string, data: any): void {
     const oldStatus = current?.status   ?? "unknown";
     const oldPlatform = current?.platform ?? null;
 
-    // No change — skip (but always update in-memory platform if it differs)
+    // No change — skip
     if (oldStatus === newStatus && oldPlatform === platform) return;
 
     // Close the current open presence session
@@ -54,7 +54,7 @@ export function handlePresenceUpdate(targetId: string, data: any): void {
     // Open a new session for the new status
     stmts.insertPresenceSession.run(targetId, newStatus, platform, now);
 
-    // Emit an event
+    // Store processed event data (camelCase) for consistency with alert engine
     const eventData = JSON.stringify({
         oldStatus,
         newStatus,
@@ -64,13 +64,27 @@ export function handlePresenceUpdate(targetId: string, data: any): void {
     });
     stmts.insertEvent.run(targetId, "PRESENCE_UPDATE", now, eventData, null, null);
 
-    // Fire alert evaluation with collector-shaped data (engine expects newStatus/oldStatus)
+    // Fire alert evaluation with processed data
     evaluateEvent("PRESENCE_UPDATE", targetId, eventData, now);
+
+    // Push processed event to SSE clients (not raw Discord payload)
+    pushSSEEvent({
+        target_id:  targetId,
+        event_type: "PRESENCE_UPDATE",
+        timestamp:  now,
+        data: { oldStatus, newStatus, platform, oldPlatform, clientStatus },
+    });
 
     // Track platform switch
     if (oldPlatform && platform && oldPlatform !== platform) {
         const switchData = JSON.stringify({ from: oldPlatform, to: platform });
         stmts.insertEvent.run(targetId, "PLATFORM_SWITCH", now, switchData, null, null);
+        pushSSEEvent({
+            target_id:  targetId,
+            event_type: "PLATFORM_SWITCH",
+            timestamp:  now,
+            data: { from: oldPlatform, to: platform },
+        });
         log.debug(`${targetId} switched platform: ${oldPlatform} -> ${platform}`);
     }
 
@@ -93,6 +107,8 @@ export function initPresence(targetId: string, data: any): void {
         stmts.insertPresenceSession.run(targetId, status, platform, now);
         const eventData = JSON.stringify({ status, platform, clientStatus, midSession: true });
         stmts.insertEvent.run(targetId, "INITIAL_PRESENCE", now, eventData, null, null);
+        // Do NOT push INITIAL_PRESENCE to SSE — it fires during reconnect/chunk processing
+        // and would spam the live feed with stale state. Only real changes get SSE events.
         log.debug(`${targetId}: initial presence ${status} (${platform || "unknown"})`);
     } else {
         log.debug(`${targetId}: initial presence offline (no session opened)`);

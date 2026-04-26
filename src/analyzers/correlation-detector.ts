@@ -4,13 +4,10 @@ import { getStmts } from "../database/queries";
 const log = createLogger("CorrelationDetector");
 
 export interface EventCorrelation {
-    eventTypeA: string;
-    eventTypeB: string;
-    direction: "A_before_B" | "A_after_B" | "concurrent";
-    windowMs: number;
+    triggerType: string;
+    followType: string;
     occurrences: number;
-    totalEventsA: number;
-    totalEventsB: number;
+    avgDelayMs: number;
     lift: number;
     confidence: number;
 }
@@ -64,21 +61,29 @@ export function detectCorrelations(
             const totalB = eventsB.length;
 
             let occurrences = 0;
+            const delays: number[] = [];
 
             // For each A, count B occurrences within windowMs after
             for (const eA of eventsA) {
                 const afterA = eA.timestamp;
                 const beforeB = afterA + windowMs;
-                const count = eventsB.filter(
+                const matching = eventsB.filter(
                     eB => eB.timestamp > afterA && eB.timestamp <= beforeB
-                ).length;
-                if (count > 0) occurrences++;
+                );
+                if (matching.length > 0) {
+                    occurrences++;
+                    // Record delay to first matching B
+                    delays.push(matching[0].timestamp - afterA);
+                }
             }
 
             if (occurrences < 3) continue;
 
-            // Lift = P(A∧B) / (P(A) * P(B))
-            // Approximated as: occurrences / totalA vs totalB/totalEvents
+            const avgDelayMs = delays.length > 0
+                ? Math.round(delays.reduce((a, b) => a + b, 0) / delays.length)
+                : 0;
+
+            // Lift = P(A→B) / P(B)
             const pAB = occurrences / totalA;
             const pB = totalB / totalEvents;
             const lift = pB > 0 ? pAB / pB : 0;
@@ -87,13 +92,10 @@ export function detectCorrelations(
             if (lift < 1.5) continue;
 
             correlations.push({
-                eventTypeA: typeA,
-                eventTypeB: typeB,
-                direction: "A_before_B",
-                windowMs,
+                triggerType: typeA,
+                followType: typeB,
                 occurrences,
-                totalEventsA: totalA,
-                totalEventsB: totalB,
+                avgDelayMs,
                 lift: Math.round(lift * 100) / 100,
                 confidence: Math.round(confidence * 1000) / 1000,
             });

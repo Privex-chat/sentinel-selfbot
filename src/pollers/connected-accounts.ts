@@ -3,13 +3,13 @@ import { config } from "../utils/config";
 import { withJitter } from "../utils/jitter";
 import { discordFetch } from "../utils/rate-limiter";
 import { getStmts } from "../database/queries";
+import { pushSSEEvent } from "../api/routes/events";
 
 const log = createLogger("ConnectedAccounts");
 
 let intervalHandle: NodeJS.Timeout | null = null;
 const POLL_INTERVAL_BASE = 1_800_000; // 30 minutes
 
-// In-memory cache: what was last observed per target (initialized from DB on first poll)
 const lastKnownAccounts = new Map<string, Map<string, any>>();
 
 async function pollTarget(targetId: string): Promise<void> {
@@ -29,7 +29,6 @@ async function pollTarget(targetId: string): Promise<void> {
         const stmts       = getStmts();
         const now         = Date.now();
 
-        // Seed cache from DB snapshot on first poll for this target
         if (!lastKnownAccounts.has(targetId)) {
             const lastSnapshot = stmts.getLatestSnapshot.get(targetId) as any;
             let seed: any[] = [];
@@ -44,33 +43,46 @@ async function pollTarget(targetId: string): Promise<void> {
 
         for (const [key, account] of newTypes) {
             if (!oldTypes.has(key)) {
+                const eventPayload = {
+                    type:       account.type,
+                    name:       account.name,
+                    id:         account.id,
+                    verified:   account.verified,
+                    visibility: account.visibility,
+                };
                 stmts.insertEvent.run(
                     targetId, "ACCOUNT_CONNECTED", now,
-                    JSON.stringify({
-                        type:       account.type,
-                        name:       account.name,
-                        id:         account.id,
-                        verified:   account.verified,
-                        visibility: account.visibility,
-                    }),
+                    JSON.stringify(eventPayload),
                     null, null
                 );
+                pushSSEEvent({
+                    target_id: targetId,
+                    event_type: "ACCOUNT_CONNECTED",
+                    timestamp: now,
+                    data: eventPayload,
+                });
                 log.info(`${targetId}: connected ${account.type} account "${account.name}"`);
             }
         }
 
         for (const [key, account] of oldTypes) {
             if (!newTypes.has(key)) {
+                const eventPayload = { type: account.type, name: account.name, id: account.id };
                 stmts.insertEvent.run(
                     targetId, "ACCOUNT_DISCONNECTED", now,
-                    JSON.stringify({ type: account.type, name: account.name, id: account.id }),
+                    JSON.stringify(eventPayload),
                     null, null
                 );
+                pushSSEEvent({
+                    target_id: targetId,
+                    event_type: "ACCOUNT_DISCONNECTED",
+                    timestamp: now,
+                    data: eventPayload,
+                });
                 log.info(`${targetId}: disconnected ${account.type} account "${account.name}"`);
             }
         }
 
-        // Update cache so next poll diffs against current state
         lastKnownAccounts.set(targetId, newTypes);
     } catch (err: any) {
         log.error(`Connected accounts poll error for ${targetId}: ${err.message}`);
