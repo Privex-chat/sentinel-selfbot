@@ -47,7 +47,6 @@ function cleanupStaleCompositeState(): void {
     }
 }
 
-// Cleanup every 60 seconds
 setInterval(cleanupStaleCompositeState, 60_000).unref?.();
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -136,7 +135,6 @@ function handleCompositeRule(
 
     const state = targetMap.get(targetId)!;
 
-    // Check if this event satisfies any sub-condition
     for (const subCond of cc.conditions) {
         const condKey = JSON.stringify(subCond);
         if (state.satisfiedConditions.has(condKey)) continue;
@@ -159,7 +157,6 @@ function handleCompositeRule(
         }
     }
 
-    // Check if all conditions satisfied within window
     const allSatisfied = cc.conditions.every(c =>
         state.satisfiedConditions.has(JSON.stringify(c))
     );
@@ -172,6 +169,10 @@ function handleCompositeRule(
 }
 
 // ── Condition matching ────────────────────────────────────────────────────────
+//
+// NOTE: eventData is always the PROCESSED event payload stored in the events
+// table (camelCase fields: newStatus, oldStatus, channelId, messageId, …).
+// Collectors call evaluateEvent directly with that processed JSON string.
 
 function matchesCondition(
     rule: AlertRule,
@@ -182,10 +183,13 @@ function matchesCondition(
     const cond = rule.condition;
     const eventTime = new Date(eventTimestamp);
 
+    // Parse once — data is always a JSON string from the collector
+    const parsed: any = typeof data === "string" ? safeParse(data) : data;
+
     switch (rule.rule_type) {
         case "COMES_ONLINE": {
             if (eventType !== "PRESENCE_UPDATE") return false;
-            const parsed = typeof data === "string" ? JSON.parse(data) : data;
+            // processed: { newStatus, oldStatus, … }
             if (parsed.newStatus !== "online") return false;
             if (cond.after_hour !== undefined) {
                 const hour = eventTime.getHours();
@@ -196,13 +200,11 @@ function matchesCondition(
 
         case "GOES_OFFLINE": {
             if (eventType !== "PRESENCE_UPDATE") return false;
-            const parsed = typeof data === "string" ? JSON.parse(data) : data;
             return parsed.newStatus === "offline";
         }
 
         case "STATUS_CHANGE": {
             if (eventType !== "PRESENCE_UPDATE") return false;
-            const parsed = typeof data === "string" ? JSON.parse(data) : data;
             if (cond.field === "transition") {
                 const expected = cond.value as string;
                 const actual = `${parsed.oldStatus}->${parsed.newStatus}`;
@@ -213,7 +215,6 @@ function matchesCondition(
 
         case "STARTS_ACTIVITY": {
             if (eventType !== "ACTIVITY_START") return false;
-            const parsed = typeof data === "string" ? JSON.parse(data) : data;
             if (cond.value) {
                 return parsed.name?.toLowerCase().includes(cond.value.toLowerCase());
             }
@@ -222,7 +223,6 @@ function matchesCondition(
 
         case "STOPS_ACTIVITY": {
             if (eventType !== "ACTIVITY_END") return false;
-            const parsed = typeof data === "string" ? JSON.parse(data) : data;
             if (cond.value) {
                 return parsed.name?.toLowerCase().includes(cond.value.toLowerCase());
             }
@@ -231,7 +231,6 @@ function matchesCondition(
 
         case "JOINS_VOICE": {
             if (eventType !== "VOICE_JOIN") return false;
-            const parsed = typeof data === "string" ? JSON.parse(data) : data;
             if (cond.field === "guildId" && cond.value) return parsed.guildId === cond.value;
             if (cond.field === "channelId" && cond.value) return parsed.channelId === cond.value;
             return true;
@@ -242,13 +241,12 @@ function matchesCondition(
 
         case "SENDS_MESSAGE": {
             if (eventType !== "MESSAGE_CREATE") return false;
-            const parsed = typeof data === "string" ? JSON.parse(data) : data;
-            // Discord gateway uses snake_case; normalise both
+            // processed: { messageId, channelId, guildId, … }
             if (cond.field === "channelId" && cond.value) {
-                return parsed.channelId === cond.value || parsed.channel_id === cond.value;
+                return parsed.channelId === cond.value;
             }
             if (cond.field === "guildId" && cond.value) {
-                return parsed.guildId === cond.value || parsed.guild_id === cond.value;
+                return parsed.guildId === cond.value;
             }
             return true;
         }
@@ -265,22 +263,28 @@ function matchesCondition(
         case "KEYWORD_MENTION": {
             if (eventType !== "MESSAGE_CREATE") return false;
             if (!cond.value) return false;
-            const parsed = typeof data === "string" ? JSON.parse(data) : data;
+            // processed: { messageId, … } — look up stored content
+            const msgId = parsed.messageId;
+            if (!msgId) return false;
             try {
                 const stmts = getStmts();
-                const msg = stmts.getMessage.get(parsed.messageId) as any;
+                const msg = stmts.getMessage.get(msgId) as any;
                 if (msg?.content) {
-                    const keywords = (cond.value as string).split(",").map((k: string) => k.trim().toLowerCase());
+                    const keywords = (cond.value as string)
+                        .split(",")
+                        .map((k: string) => k.trim().toLowerCase())
+                        .filter(Boolean);
                     const content = msg.content.toLowerCase();
                     return keywords.some((k: string) => content.includes(k));
                 }
-            } catch { }
+            } catch (err: any) {
+                log.warn(`KEYWORD_MENTION lookup failed: ${err.message}`);
+            }
             return false;
         }
 
         case "NEW_GAME": {
             if (eventType !== "ACTIVITY_START") return false;
-            const parsed = typeof data === "string" ? JSON.parse(data) : data;
             if (parsed.type !== 0) return false;
             try {
                 const stmts = getStmts();
@@ -295,7 +299,6 @@ function matchesCondition(
 
         case "UNUSUAL_HOUR": {
             if (eventType !== "PRESENCE_UPDATE") return false;
-            const parsed = typeof data === "string" ? JSON.parse(data) : data;
             if (parsed.newStatus === "offline") return false;
             const hour = eventTime.getHours();
             const startHour = cond.start_hour ?? 2;
@@ -317,7 +320,6 @@ function routeAlert(
     eventData: any
 ): void {
     if (config.alertDigestMode || rule.digest_mode === 1) {
-        // Lazy import to avoid circular dependency
         const message = generateAlertMessage(rule, targetId, eventType, eventData);
         import("./digest").then(({ addToDigest }) => {
             addToDigest(rule.id, targetId, rule.rule_type, message, Date.now());
@@ -336,32 +338,39 @@ function fireAlert(
     eventData: any
 ): void {
     const message = generateAlertMessage(rule, targetId, eventType, eventData);
-    const stmts = getStmts();
     const now = Date.now();
 
-    stmts.insertAlertHistory.run(rule.id, targetId, rule.rule_type, message, now);
+    // ── Persist to DB — isolated so a DB failure never blocks webhook delivery ──
+    try {
+        const stmts = getStmts();
+        stmts.insertAlertHistory.run(rule.id, targetId, rule.rule_type, message, now);
+        stmts.incrementAlertFireCount.run(now, rule.id);
 
-    // Fatigue tracking
-    stmts.incrementAlertFireCount.run(now, rule.id);
+        // Fatigue tracking (in-memory + DB)
+        const cached = cachedRules.find(r => r.id === rule.id);
+        if (cached) {
+            cached.fire_count_24h = (cached.fire_count_24h || 0) + 1;
+            cached.last_fire_at = now;
 
-    // Update cached rule fire count
-    const cached = cachedRules.find(r => r.id === rule.id);
-    if (cached) {
-        cached.fire_count_24h = (cached.fire_count_24h || 0) + 1;
-        cached.last_fire_at = now;
-
-        const threshold = cached.fatigue_threshold || config.alertFatigueThreshold;
-        if (cached.fire_count_24h >= threshold) {
-            stmts.suppressAlertRule.run(rule.id);
-            cached.auto_suppressed = 1;
-            log.warn(`Alert rule ${rule.id} (${rule.rule_type}) auto-suppressed after ${cached.fire_count_24h} fires`);
-
-            pushSSEAlertSuppressed(rule.id, targetId, rule.rule_type);
+            const threshold = cached.fatigue_threshold || config.alertFatigueThreshold;
+            if (cached.fire_count_24h >= threshold) {
+                stmts.suppressAlertRule.run(rule.id);
+                cached.auto_suppressed = 1;
+                log.warn(
+                    `Alert rule ${rule.id} (${rule.rule_type}) auto-suppressed ` +
+                    `after ${cached.fire_count_24h} fires in 24h`
+                );
+                pushSSEAlertSuppressed(rule.id, targetId, rule.rule_type);
+            }
         }
+    } catch (err: any) {
+        log.error(`Alert DB write failed for rule ${rule.id} (${rule.rule_type}): ${err.message}`);
+        // Continue — webhook must still fire even if DB write fails
     }
 
-    log.info(`ALERT [${rule.rule_type}] ${targetId}: ${message}`);
+    log.info(`ALERT [${rule.rule_type}] target=${targetId}: ${message}`);
 
+    // SSE callback
     alertCallback?.({
         ruleId: rule.id,
         targetId,
@@ -369,9 +378,13 @@ function fireAlert(
         message,
     });
 
-    // Webhook delivery (non-blocking)
+    // ── Webhook delivery (non-blocking, fire-and-forget) ──────────────────────
     if (config.alertWebhookUrl) {
-        const isDiscord = /https?:\/\/(?:discord\.com|discordapp\.com)\/api\/webhooks\//i.test(config.alertWebhookUrl);
+        const isDiscord =
+            /https?:\/\/(?:discord\.com|discordapp\.com)\/api\/webhooks\//i.test(
+                config.alertWebhookUrl
+            );
+
         const body = isDiscord
             ? JSON.stringify({
                 content: `**[${rule.rule_type.replace(/_/g, " ")}]** ${message}`,
@@ -390,17 +403,26 @@ function fireAlert(
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body,
-        }).then(async (res) => {
-            if (!res.ok) {
-                const text = await res.text().catch(() => "");
-                log.warn(`Webhook delivery failed: HTTP ${res.status} — ${text.slice(0, 200)}`);
-            }
-        }).catch(err => log.warn(`Webhook delivery failed: ${err.message}`));
+        })
+            .then(async (res) => {
+                if (!res.ok) {
+                    const text = await res.text().catch(() => "");
+                    log.warn(
+                        `Webhook delivery failed: HTTP ${res.status} — ${text.slice(0, 200)}`
+                    );
+                } else {
+                    log.debug(
+                        `Webhook delivered OK for [${rule.rule_type}] target=${targetId}`
+                    );
+                }
+            })
+            .catch((err) =>
+                log.warn(`Webhook delivery error: ${err.message}`)
+            );
     }
 }
 
 function pushSSEAlertSuppressed(ruleId: number, targetId: string, alertType: string): void {
-    // Lazy import to avoid circular at module load
     import("../api/routes/events").then(({ pushSSEEvent }) => {
         pushSSEEvent({
             target_id: targetId,
@@ -417,7 +439,6 @@ export function resetAlertFireCounts(): void {
     const stmts = getStmts();
     const cutoff = Date.now() - 86_400_000;
     stmts.resetAlertFireCounts.run(cutoff);
-    // Refresh in-memory state
     reloadRules();
 }
 
@@ -445,7 +466,7 @@ function generateAlertMessage(
         case "PROFILE_CHANGE":  return `Target ${targetId} updated their profile`;
         case "NEW_GAME":        return `Target ${targetId} playing new game: ${parsed.name}`;
         case "UNUSUAL_HOUR":    return `Target ${targetId} online at unusual hour (${new Date().getHours()}:00)`;
-        case "KEYWORD_MENTION": return `Target ${targetId} mentioned keyword`;
+        case "KEYWORD_MENTION": return `Target ${targetId} mentioned a tracked keyword`;
         default:                return `Alert triggered for ${targetId}: ${rule.rule_type}`;
     }
 }
