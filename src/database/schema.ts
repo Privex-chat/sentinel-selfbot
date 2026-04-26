@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export const CREATE_TABLES_SQL = `
 -- Core tables
@@ -159,15 +159,26 @@ CREATE TABLE IF NOT EXISTS guild_member_events (
     FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE
 );
 
+-- alert_rules includes all v2 columns in the base definition.
+-- Migration v2 handles ALTER TABLE for databases that pre-date v2 (try/catch).
 CREATE TABLE IF NOT EXISTS alert_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     target_id TEXT,
     rule_type TEXT NOT NULL,
     condition TEXT NOT NULL,
     enabled INTEGER DEFAULT 1,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    fire_count_24h INTEGER NOT NULL DEFAULT 0,
+    last_fire_at INTEGER,
+    auto_suppressed INTEGER NOT NULL DEFAULT 0,
+    fatigue_threshold INTEGER NOT NULL DEFAULT 20,
+    composite_condition TEXT,
+    digest_mode INTEGER NOT NULL DEFAULT 0
 );
 
+-- alert_history uses ON DELETE SET NULL so deleting an alert rule never
+-- blocks on referencing history rows (matches Supabase FK behaviour).
+-- Migration v4 recreates this table for databases that pre-date v4.
 CREATE TABLE IF NOT EXISTS alert_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rule_id INTEGER,
@@ -176,8 +187,11 @@ CREATE TABLE IF NOT EXISTS alert_history (
     message TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
     acknowledged INTEGER DEFAULT 0,
-    FOREIGN KEY (rule_id) REFERENCES alert_rules(id)
+    FOREIGN KEY (rule_id) REFERENCES alert_rules(id) ON DELETE SET NULL,
+    FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_alert_history_target ON alert_history(target_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_alert_history_rule ON alert_history(rule_id);
 
 CREATE TABLE IF NOT EXISTS daily_summaries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -312,9 +326,6 @@ CREATE TABLE IF NOT EXISTS sync_state (
 );
 
 -- ─── Heartbeat log ────────────────────────────────────────────────────────────
--- Written every 60 s so that on an unclean exit we know the last moment the
--- process was definitely alive. Used to close stale sessions more accurately
--- than using the restart timestamp. Local-only — not synced to Supabase.
 CREATE TABLE IF NOT EXISTS heartbeat_log (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp INTEGER NOT NULL

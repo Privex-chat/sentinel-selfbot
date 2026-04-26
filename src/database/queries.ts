@@ -159,8 +159,13 @@ function prepareStatements() {
         ),
 
         // ── Alert rules ────────────────────────────────────────────────────────
+        // Includes all v2 columns (fire_count_24h, auto_suppressed, fatigue_threshold,
+        // composite_condition, digest_mode). The schema also has these from v2 migration.
         insertAlertRule: db.prepare(
-            "INSERT INTO alert_rules (target_id, rule_type, condition, enabled, created_at) VALUES (?, ?, ?, ?, ?)"
+            `INSERT INTO alert_rules
+             (target_id, rule_type, condition, enabled, created_at,
+              digest_mode, fatigue_threshold, composite_condition)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         ),
         getAlertRules: db.prepare("SELECT * FROM alert_rules WHERE enabled = 1"),
         getAllAlertRules: db.prepare("SELECT * FROM alert_rules"),
@@ -179,6 +184,12 @@ function prepareStatements() {
         ),
         acknowledgeAlert: db.prepare(
             "UPDATE alert_history SET acknowledged = 1 WHERE id = ?"
+        ),
+        // Set rule_id = NULL before deleting an alert rule to prevent FK violation.
+        // alert_history.rule_id has ON DELETE SET NULL in the schema but older
+        // databases (pre-v4) may not, so we do it explicitly here as well.
+        nullifyAlertRuleInHistory: db.prepare(
+            "UPDATE alert_history SET rule_id = NULL WHERE rule_id = ?"
         ),
 
         // ── Daily summaries ────────────────────────────────────────────────────
@@ -224,15 +235,12 @@ function prepareStatements() {
         ),
 
         // ── Heartbeat log ──────────────────────────────────────────────────────
-        // Written every 60 s. Used to set an accurate close-timestamp for stale
-        // sessions when the process exits uncleanly.
         insertHeartbeat: db.prepare(
             "INSERT INTO heartbeat_log (timestamp) VALUES (?)"
         ),
         getLastHeartbeat: db.prepare(
             "SELECT timestamp FROM heartbeat_log ORDER BY timestamp DESC LIMIT 1"
         ),
-        // Keep only the most recent 30 entries — we only need the latest
         pruneHeartbeats: db.prepare(
             `DELETE FROM heartbeat_log
              WHERE id NOT IN (
