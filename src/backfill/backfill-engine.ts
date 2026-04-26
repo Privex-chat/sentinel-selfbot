@@ -4,6 +4,7 @@ import { getStmts } from "../database/queries";
 import { config } from "../utils/config";
 import { discordFetch } from "../utils/rate-limiter";
 import { handleMessageCreate } from "../collectors/message";
+import { handleProfileUpdate } from "../collectors/profile";
 
 const log = createLogger("BackfillEngine");
 
@@ -16,6 +17,44 @@ const activeBackfills = new Set<string>();
 
 // Paused flag per target
 const pausedTargets = new Set<string>();
+
+// ── Profile fetch helper ──────────────────────────────────────────────────────
+
+/**
+ * Fetches the target's Discord profile and stores it via handleProfileUpdate.
+ * Returns the mutual_guilds array, or null if the fetch fails.
+ */
+async function fetchAndStoreProfile(targetId: string): Promise<any[] | null> {
+    log.info(`No profile snapshot for ${targetId} — fetching profile before backfill`);
+    try {
+        const res = await discordFetch(
+            `/users/${targetId}/profile?with_mutual_guilds=true&with_mutual_friends_count=false`,
+            config.discordToken
+        );
+
+        if (!res.ok) {
+            log.warn(`Failed to fetch profile for ${targetId}: HTTP ${res.status}`);
+            return null;
+        }
+
+        const data = await res.json() as any;
+
+        handleProfileUpdate(
+            targetId,
+            data.user,
+            data.user_profile,
+            data.connected_accounts,
+            data.mutual_guilds
+        );
+
+        const guilds: any[] = data.mutual_guilds || [];
+        log.info(`Fetched profile for ${targetId}: ${guilds.length} mutual guild(s)`);
+        return guilds;
+    } catch (err: any) {
+        log.error(`Profile fetch error for ${targetId}: ${err.message}`);
+        return null;
+    }
+}
 
 // ── Channel processing ────────────────────────────────────────────────────────
 
@@ -58,7 +97,7 @@ async function processChannel(
             let url = `/channels/${channelId}/messages?limit=100`;
             if (cursor) url += `&before=${cursor}`;
 
-            const res = await discordFetch(url, `Bot ${config.discordToken}`);
+            const res = await discordFetch(url, config.discordToken);
 
             if (res.status === 403 || res.status === 404) {
                 stmts.updateBackfillProgress.run(
@@ -128,7 +167,7 @@ async function processGuild(targetId: string, guildId: string): Promise<void> {
     try {
         const res = await discordFetch(
             `/guilds/${guildId}/channels`,
-            `Bot ${config.discordToken}`
+            config.discordToken
         );
 
         if (!res.ok) {
@@ -185,24 +224,40 @@ export async function startBackfillForTarget(targetId: string): Promise<void> {
     try {
         const stmts = getStmts();
 
-        // Get mutual guilds from latest profile snapshot
+        // Try to get mutual guilds from the latest profile snapshot
+        let mutualGuilds: any[] = [];
         const snapshot = stmts.getLatestSnapshot.get(targetId) as any;
-        if (!snapshot?.mutual_guilds) {
-            log.warn(`No mutual guilds for ${targetId}, skipping backfill`);
+
+        if (snapshot?.mutual_guilds) {
+            // Snapshot exists — parse it
+            try { mutualGuilds = JSON.parse(snapshot.mutual_guilds); } catch { }
+        }
+
+        // No snapshot or snapshot has no mutual guilds — fetch profile inline
+        if (!mutualGuilds.length) {
+            const fetched = await fetchAndStoreProfile(targetId);
+            if (fetched === null) {
+                log.warn(`Could not obtain profile for ${targetId}, skipping backfill`);
+                return;
+            }
+            mutualGuilds = fetched;
+        }
+
+        if (!mutualGuilds.length) {
+            log.warn(`No mutual guilds found for ${targetId} (not sharing any servers), skipping backfill`);
             return;
         }
 
-        let guilds: any[] = [];
-        try { guilds = JSON.parse(snapshot.mutual_guilds); } catch { }
-
-        const guildIds = guilds
-            .map((g: any) => typeof g === "string" ? g : g.id)
-            .filter(Boolean);
+        const guildIds = mutualGuilds
+            .map((g: any) => (typeof g === "string" ? g : g.id))
+            .filter(Boolean) as string[];
 
         if (!guildIds.length) {
-            log.warn(`No guild IDs found for ${targetId}`);
+            log.warn(`No valid guild IDs extracted for ${targetId}`);
             return;
         }
+
+        log.info(`Backfilling ${targetId} across ${guildIds.length} mutual guild(s)`);
 
         // Process guilds concurrently (max 2 at once)
         for (let i = 0; i < guildIds.length; i += MAX_CONCURRENT_GUILDS) {
