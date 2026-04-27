@@ -15,6 +15,26 @@ export function registerTargetRoutes(app: FastifyInstance): void {
         if (!userId || !/^\d{17,20}$/.test(userId)) {
             return reply.code(400).send({ error: "Invalid userId" });
         }
+
+        const db = getDb();
+
+        // Rate limit: max 1 new target per hour to avoid Discord flagging the account
+        const RATE_LIMIT_MS = 60 * 60 * 1000; // 1 hour
+        const recent = db.prepare(
+            "SELECT added_at FROM targets ORDER BY added_at DESC LIMIT 1"
+        ).get() as { added_at: number } | undefined;
+
+        if (recent) {
+            const elapsed = Date.now() - recent.added_at;
+            if (elapsed < RATE_LIMIT_MS) {
+                const waitMins = Math.ceil((RATE_LIMIT_MS - elapsed) / 60000);
+                return reply.code(429).send({
+                    error: `Rate limited: adding targets too quickly can flag your Discord account. Wait ${waitMins} more minute${waitMins === 1 ? "" : "s"} before adding another target.`,
+                    retryAfterMs: RATE_LIMIT_MS - elapsed,
+                });
+            }
+        }
+
         const stmts = getStmts();
         stmts.insertTarget.run(userId, Date.now(), label || null, notes || null, priority ?? 0, 1);
 
