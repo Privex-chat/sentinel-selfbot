@@ -29,9 +29,11 @@ export function analyzeVoiceHabits(targetId: string, days: number = 30): VoiceHa
     const byDay = new Array(7).fill(0);
     const channels: Map<string, { guildId: string; totalMs: number; sessions: number }> = new Map();
     const partners: Map<string, number> = new Map();
+    const nowMs = Date.now();
 
     for (const s of sessions) {
-        const duration = s.duration_ms || 0;
+        // Open sessions (duration_ms IS NULL): substitute elapsed time so far
+        const duration = s.duration_ms ?? (nowMs - s.start_time);
         totalMs += duration;
 
         if (s.self_mute) muteMs += duration;

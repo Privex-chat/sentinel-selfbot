@@ -23,11 +23,13 @@ export function predictAvailability(targetId: string, weeks: number = 4): Availa
     const voice = create7x24();
     const gaming = create7x24();
 
-    // Presence data
-    const presenceSessions = stmts.getPresenceSessions.all(targetId, since, Date.now()) as any[];
+    const nowMs = Date.now();
+
+    // Presence data — open sessions use nowMs as their end so live state is reflected
+    const presenceSessions = stmts.getPresenceSessions.all(targetId, since, nowMs) as any[];
     for (const s of presenceSessions) {
-        if (s.status === "offline" || !s.end_time) continue;
-        fillTimeRange(online, s.start_time, s.end_time);
+        if (s.status === "offline") continue;
+        fillTimeRange(online, s.start_time, s.end_time ?? nowMs);
     }
 
     // Message data
@@ -38,18 +40,17 @@ export function predictAvailability(targetId: string, weeks: number = 4): Availa
         messaging[d.getDay()][d.getHours()]++;
     }
 
-    // Voice data
+    // Voice data — include open session
     const voiceSessions = stmts.getVoiceSessions.all(targetId, since, 5000) as any[];
     for (const s of voiceSessions) {
-        if (!s.end_time) continue;
-        fillTimeRange(voice, s.start_time, s.end_time);
+        fillTimeRange(voice, s.start_time, s.end_time ?? nowMs);
     }
 
-    // Gaming data
+    // Gaming data — include open session
     const activitySessions = stmts.getActivitySessions.all(targetId, since, 5000) as any[];
     for (const s of activitySessions) {
-        if (s.activity_type !== 0 || !s.end_time) continue;
-        fillTimeRange(gaming, s.start_time, s.end_time);
+        if (s.activity_type !== 0) continue;
+        fillTimeRange(gaming, s.start_time, s.end_time ?? nowMs);
     }
 
     // Normalize to probabilities (0-1)

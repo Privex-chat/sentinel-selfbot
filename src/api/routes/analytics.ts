@@ -25,23 +25,26 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
         const days    = parseInt(req.query.days || "30");
         const since   = Date.now() - days * 86_400_000;
 
+        const now = Date.now();
+
+        // COALESCE handles open sessions (duration_ms IS NULL): substitute elapsed time so far
         const sessions = db.prepare(
             `SELECT status,
-                    SUM(duration_ms) AS total_ms,
-                    COUNT(*)         AS count
+                    SUM(COALESCE(duration_ms, ? - start_time)) AS total_ms,
+                    COUNT(*)                                    AS count
              FROM   presence_sessions
              WHERE  target_id = ? AND start_time >= ?
              GROUP  BY status`
-        ).all(userId, since) as any[];
+        ).all(now, userId, since) as any[];
 
         const platformBreakdown = db.prepare(
             `SELECT platform,
-                    SUM(duration_ms) AS total_ms,
-                    COUNT(*)         AS count
+                    SUM(COALESCE(duration_ms, ? - start_time)) AS total_ms,
+                    COUNT(*)                                    AS count
              FROM   presence_sessions
              WHERE  target_id = ? AND start_time >= ? AND platform IS NOT NULL
              GROUP  BY platform`
-        ).all(userId, since) as any[];
+        ).all(now, userId, since) as any[];
 
         // Compute total active (online + idle + dnd) for convenience
         const totalActiveMs = sessions

@@ -17,14 +17,15 @@ export interface GameStats {
 export interface GamingProfileData {
     games: GameStats[];
     totalGamingMs: number;
-    peakGamingHour: number;
+    peakGamingHour: number | null;
     recentlyStarted: string[];
     abandoned: string[];
 }
 
 export function analyzeGamingProfile(targetId: string, days: number = 90): GamingProfileData {
     const stmts = getStmts();
-    const since = Date.now() - days * 86400000;
+    const now = Date.now();
+    const since = now - days * 86400000;
     const sessions = stmts.getActivitySessions.all(targetId, since, 10000) as any[];
 
     // Filter to gaming only (type 0 = Playing)
@@ -46,7 +47,7 @@ export function analyzeGamingProfile(targetId: string, days: number = 90): Gamin
     const hourCounts = new Array(24).fill(0);
 
     for (const [name, data] of gameMap) {
-        const totalMs = data.sessions.reduce((sum: number, s: any) => sum + (s.duration_ms || 0), 0);
+        const totalMs = data.sessions.reduce((sum: number, s: any) => sum + (s.duration_ms ?? (now - s.start_time)), 0);
         const first = Math.min(...data.sessions.map((s: any) => s.start_time));
         const last = Math.max(...data.sessions.map((s: any) => s.start_time));
 
@@ -84,7 +85,7 @@ export function analyzeGamingProfile(targetId: string, days: number = 90): Gamin
     return {
         games,
         totalGamingMs: games.reduce((sum, g) => sum + g.totalPlaytimeMs, 0),
-        peakGamingHour: hourCounts.indexOf(Math.max(...hourCounts)),
+        peakGamingHour: gameSessions.length > 0 ? hourCounts.indexOf(Math.max(...hourCounts)) : null,
         recentlyStarted,
         abandoned,
     };

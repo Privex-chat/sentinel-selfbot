@@ -1,5 +1,6 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
+import { getDb } from "../database/connection";
 import { getTargetConfig } from "./baseline";
 
 const log = createLogger("SocialGraph");
@@ -33,10 +34,12 @@ export function buildSocialGraph(targetId: string, days: number = 30): SocialGra
     }
 
     // Reply interactions + mention extraction
+    const db = getDb();
     const MENTION_RE = /<@!?(\d{17,20})>/g;
-    const messages = stmts.getMessagesByTarget.all(targetId, 5000, 0) as any[];
+    const messages = db.prepare(
+        "SELECT * FROM messages WHERE target_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 5000"
+    ).all(targetId, since) as any[];
     for (const msg of messages) {
-        if (msg.created_at < since) continue;
         if (msg.is_reply && msg.reply_to_user_id && msg.reply_to_user_id !== targetId) {
             getOrCreate(msg.reply_to_user_id).messages++;
         }
@@ -53,21 +56,23 @@ export function buildSocialGraph(targetId: string, days: number = 30): SocialGra
     }
 
     // Reaction interactions
-    const reactions = stmts.getReactions.all(targetId, 5000) as any[];
+    const reactions = db.prepare(
+        "SELECT * FROM reactions WHERE target_id = ? AND added_at >= ? ORDER BY added_at DESC LIMIT 5000"
+    ).all(targetId, since) as any[];
     for (const r of reactions) {
-        if (r.added_at < since) continue;
         if (r.message_author_id && r.message_author_id !== targetId) {
             getOrCreate(r.message_author_id).reactions++;
         }
     }
 
     // Voice co-presence
+    const nowMs = Date.now();
     const voiceSessions = stmts.getVoiceSessions.all(targetId, since, 1000) as any[];
     for (const session of voiceSessions) {
         if (!session.co_participants) continue;
         try {
             const participants: string[] = JSON.parse(session.co_participants);
-            const duration = session.duration_ms || 0;
+            const duration = session.duration_ms ?? (nowMs - session.start_time);
             for (const p of participants) {
                 if (p !== targetId) {
                     getOrCreate(p).voice += duration;
