@@ -1,8 +1,12 @@
 import { createLogger } from "./utils/logger";
 import { getStmts } from "./database/queries";
 import { getDb } from "./database/connection";
+import { notifyDailySummary } from "./utils/webhook-notifier";
 
 const log = createLogger("DailySummary");
+
+// Track the last date we sent summary notifications so we only send once per UTC day.
+let lastNotifiedDate = "";
 
 export function computeDailySummaries(): void {
     const stmts = getStmts();
@@ -16,9 +20,33 @@ export function computeDailySummaries(): void {
 
     log.info(`Computing daily summaries for ${dateStr} (${targets.length} targets)`);
 
+    const sendNotifications = lastNotifiedDate !== dateStr;
+    if (sendNotifications) lastNotifiedDate = dateStr;
+
     for (const target of targets) {
         try {
             computeForTarget(db, stmts, target.user_id, dateStr, dayStart, dayEnd);
+
+            if (sendNotifications) {
+                const row = stmts.getDailySummaryByDate.get(target.user_id, dateStr) as any;
+                if (row) {
+                    notifyDailySummary(
+                        target.user_id,
+                        target.label || null,
+                        dateStr,
+                        {
+                            onlineMinutes:  row.online_minutes  || 0,
+                            idleMinutes:    row.idle_minutes    || 0,
+                            dndMinutes:     row.dnd_minutes     || 0,
+                            messageCount:   row.message_count   || 0,
+                            voiceMinutes:   row.voice_minutes   || 0,
+                            deleteCount:    row.delete_count    || 0,
+                            editCount:      row.edit_count      || 0,
+                            peakHour:       row.peak_hour       ?? null,
+                        }
+                    ).catch(() => {});
+                }
+            }
         } catch (err: any) {
             log.error(`Summary error for ${target.user_id}: ${err.message}`);
         }

@@ -40,6 +40,7 @@ import { runAllBaselineComputation } from "./analyzers/baseline";
 import { scheduleBriefGeneration } from "./briefs/brief-generator";
 import { startBackfillOnStartup } from "./backfill/backfill-engine";
 import { startDigestFlusher } from "./alerts/digest";
+import { notifyStartup, notifyCriticalError } from "./utils/webhook-notifier";
 
 const log = createLogger("Sentinel");
 
@@ -544,12 +545,17 @@ process.on("SIGTERM", shutdown);
 process.on("uncaughtException", (err) => {
     log.error(`Uncaught exception: ${err.message}`);
     log.error(err.stack || "");
+    notifyCriticalError(err.message, err.stack?.slice(0, 800)).catch(() => {});
 });
 process.on("unhandledRejection", (reason) => {
-    log.error(`Unhandled rejection: ${reason}`);
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    log.error(`Unhandled rejection: ${msg}`);
+    notifyCriticalError(`Unhandled rejection: ${msg}`).catch(() => {});
 });
 
 main().catch((err) => {
     log.error(`Fatal error: ${err.message}`);
-    process.exit(1);
+    notifyCriticalError(`Fatal startup error: ${err.message}`, err.stack?.slice(0, 800))
+        .catch(() => {})
+        .finally(() => process.exit(1));
 });
