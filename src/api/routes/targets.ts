@@ -19,7 +19,7 @@ export function registerTargetRoutes(app: FastifyInstance): void {
         const db = getDb();
 
         // Rate limit: max 1 new target per hour to avoid Discord flagging the account
-        const RATE_LIMIT_MS = (20 + Math.random() * 10) * 60 * 1000;
+        const RATE_LIMIT_MS = 15 * 60 * 1000; // 15 minutes
         const recent = db.prepare(
             "SELECT added_at FROM targets ORDER BY added_at DESC LIMIT 1"
         ).get() as { added_at: number } | undefined;
