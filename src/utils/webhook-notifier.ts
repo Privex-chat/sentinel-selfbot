@@ -1,5 +1,6 @@
 import { config } from "./config";
 import { createLogger } from "./logger";
+import { enqueueWebhook } from "./webhook-queue";
 
 const log = createLogger("C2Notifier");
 
@@ -25,7 +26,7 @@ interface Embed {
     timestamp?: string;
 }
 
-async function post(embeds: Embed[], content?: string): Promise<void> {
+function post(embeds: Embed[], content?: string, label = "notifier"): void {
     const url = config.alertWebhookUrl;
     if (!url) return;
 
@@ -34,32 +35,20 @@ async function post(embeds: Embed[], content?: string): Promise<void> {
         ? JSON.stringify({ username: "Sentinel", embeds, content })
         : JSON.stringify({ embeds, content, timestamp: Date.now() });
 
-    try {
-        const res = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body,
-        });
-        if (!res.ok) {
-            const text = await res.text().catch(() => "");
-            log.warn(`Webhook post failed: HTTP ${res.status} — ${text.slice(0, 200)}`);
-        }
-    } catch (err: any) {
-        log.warn(`Webhook post error: ${err.message}`);
-    }
+    enqueueWebhook(url, body, label);
 }
 
-export async function notifyStartup(opts: {
+export function notifyStartup(opts: {
     guildCount: number;
     targetCount: number;
     activeTargetCount: number;
     ruleCount: number;
     dbMode: string;
     version?: string;
-}): Promise<void> {
+}): void {
     if (!config.alertWebhookUrl) return;
 
-    await post([{
+    post([{
         title: "Sentinel Online",
         description: "Selfbot connected and ready.",
         color: COLOR.green,
@@ -71,40 +60,40 @@ export async function notifyStartup(opts: {
         ],
         footer:    { text: "Sentinel" },
         timestamp: new Date().toISOString(),
-    }]);
+    }], undefined, "startup");
 
-    log.info("Startup notification sent");
+    log.info("Startup notification queued");
 }
 
-export async function notifyShutdown(reason?: string): Promise<void> {
+export function notifyShutdown(reason?: string): void {
     if (!config.alertWebhookUrl) return;
 
-    await post([{
+    post([{
         title:       "Sentinel Offline",
         description: reason ? `Shutdown reason: ${reason}` : "Process exiting.",
         color:       COLOR.grey,
         footer:      { text: "Sentinel" },
         timestamp:   new Date().toISOString(),
-    }]);
+    }], undefined, "shutdown");
 }
 
-export async function notifyCriticalError(message: string, context?: string): Promise<void> {
+export function notifyCriticalError(message: string, context?: string): void {
     if (!config.alertWebhookUrl) return;
 
     const fields: EmbedField[] = [];
     if (context) fields.push({ name: "Context", value: context.slice(0, 1000) });
 
-    await post([{
+    post([{
         title:       "Critical Error",
         description: `\`\`\`${message.slice(0, 1500)}\`\`\``,
         color:       COLOR.red,
         fields,
         footer:      { text: "Sentinel" },
         timestamp:   new Date().toISOString(),
-    }]);
+    }], undefined, "critical-error");
 }
 
-export async function notifyDailySummary(
+export function notifyDailySummary(
     targetId: string,
     label: string | null,
     date: string,
@@ -118,7 +107,7 @@ export async function notifyDailySummary(
         editCount:      number;
         peakHour:       number | null;
     }
-): Promise<void> {
+): void {
     if (!config.alertWebhookUrl) return;
 
     const displayName = label ? `${label} (${targetId})` : targetId;
@@ -127,7 +116,7 @@ export async function notifyDailySummary(
         ? `${(mins / 60).toFixed(1)}h`
         : `${mins}m`;
 
-    await post([{
+    post([{
         title:       `Daily Summary — ${date}`,
         description: `Target: \`${displayName}\``,
         color:       COLOR.blue,
@@ -142,5 +131,5 @@ export async function notifyDailySummary(
         ],
         footer:    { text: "Sentinel" },
         timestamp: new Date().toISOString(),
-    }]);
+    }], undefined, `daily-summary:${targetId}`);
 }

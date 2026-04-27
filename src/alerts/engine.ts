@@ -2,6 +2,7 @@ import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
 import { AlertCondition, AlertRule, EVENT_TO_ALERT_MAP } from "./conditions";
 import { config } from "../utils/config";
+import { enqueueWebhook } from "../utils/webhook-queue";
 
 const log = createLogger("AlertEngine");
 
@@ -599,22 +600,8 @@ function fireAlert(
             data:      typeof eventData === "string" ? safeParse(eventData) : eventData,
         });
 
-    log.info(`Sending webhook for [${rule.rule_type}] target=${targetId}`);
-
-    fetch(config.alertWebhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body,
-    })
-        .then(async (res) => {
-            if (!res.ok) {
-                const text = await res.text().catch(() => "");
-                log.warn(`Webhook delivery failed: HTTP ${res.status} — ${text.slice(0, 200)}`);
-            } else {
-                log.info(`Webhook delivered OK for [${rule.rule_type}] target=${targetId}`);
-            }
-        })
-        .catch((err) => log.warn(`Webhook delivery error: ${err.message}`));
+    log.info(`Queueing webhook for [${rule.rule_type}] target=${targetId}`);
+    enqueueWebhook(config.alertWebhookUrl, body, `alert:${rule.rule_type}:${targetId}`);
 }
 
 function pushSSEAlertSuppressed(ruleId: number, targetId: string, alertType: string): void {

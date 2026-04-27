@@ -2,12 +2,13 @@ import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
 import { config } from "../utils/config";
 import { pushSSEEvent } from "../api/routes/events";
+import { enqueueWebhook } from "../utils/webhook-queue";
 
 const log = createLogger("AlertDigest");
 
 const DISCORD_RE = /https?:\/\/(?:discord\.com|discordapp\.com)\/api\/webhooks\//i;
 
-async function sendDigestWebhook(entries: DigestEntry[]): Promise<void> {
+function sendDigestWebhook(entries: DigestEntry[]): void {
     if (!config.alertWebhookUrl) return;
 
     const isDiscord = DISCORD_RE.test(config.alertWebhookUrl);
@@ -34,21 +35,8 @@ async function sendDigestWebhook(entries: DigestEntry[]): Promise<void> {
             timestamp: Date.now(),
         });
 
-    try {
-        const res = await fetch(config.alertWebhookUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body,
-        });
-        if (!res.ok) {
-            const text = await res.text().catch(() => "");
-            log.warn(`Digest webhook failed: HTTP ${res.status} — ${text.slice(0, 200)}`);
-        } else {
-            log.info(`Digest webhook delivered (${entries.length} alerts)`);
-        }
-    } catch (err: any) {
-        log.warn(`Digest webhook error: ${err.message}`);
-    }
+    enqueueWebhook(config.alertWebhookUrl, body, "digest");
+    log.info(`Digest webhook queued (${entries.length} alerts)`);
 }
 
 interface DigestEntry {
@@ -120,7 +108,7 @@ function flushDigest(): void {
     digestBuffer.clear();
 
     // Send one webhook call covering all buffered alerts
-    sendDigestWebhook(allEntries).catch(() => {});
+    sendDigestWebhook(allEntries);
 }
 
 export function startDigestFlusher(): NodeJS.Timeout {

@@ -44,7 +44,7 @@ export function computeDailySummaries(): void {
                             editCount:      row.edit_count      || 0,
                             peakHour:       row.peak_hour       ?? null,
                         }
-                    ).catch(() => {});
+                    );
                 }
             }
         } catch (err: any) {

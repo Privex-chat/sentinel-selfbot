@@ -374,7 +374,7 @@ function setupGatewayHandlers(client: GatewayClient): void {
             activeTargetCount: targets.filter((t: any) => t.active).length,
             ruleCount,
             dbMode:            config.dbMode,
-        }).catch(() => {});
+        });
     });
 }
 
@@ -559,17 +559,16 @@ process.on("SIGTERM", shutdown);
 process.on("uncaughtException", (err) => {
     log.error(`Uncaught exception: ${err.message}`);
     log.error(err.stack || "");
-    notifyCriticalError(err.message, err.stack?.slice(0, 800)).catch(() => {});
+    notifyCriticalError(err.message, err.stack?.slice(0, 800));
 });
 process.on("unhandledRejection", (reason) => {
     const msg = reason instanceof Error ? reason.message : String(reason);
     log.error(`Unhandled rejection: ${msg}`);
-    notifyCriticalError(`Unhandled rejection: ${msg}`).catch(() => {});
+    notifyCriticalError(`Unhandled rejection: ${msg}`);
 });
 
 main().catch((err) => {
     log.error(`Fatal error: ${err.message}`);
-    notifyCriticalError(`Fatal startup error: ${err.message}`, err.stack?.slice(0, 800))
-        .catch(() => {})
-        .finally(() => process.exit(1));
+    notifyCriticalError(`Fatal startup error: ${err.message}`, err.stack?.slice(0, 800));
+    process.exit(1);
 });
