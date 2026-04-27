@@ -9,6 +9,12 @@ const log = createLogger("SupabaseSync");
 const BATCH_SIZE = 500;
 const UPDATE_WINDOW_MS = 3_600_000;
 
+// Columns to strip per table because they don't yet exist in the remote Supabase
+// schema. Populated automatically on the first upsert failure for that column;
+// persists for the lifetime of the process. On restart the column is retried —
+// if it's been added to Supabase in the meantime it will work fine.
+const excludedCols = new Map<string, Set<string>>();
+
 interface SyncStateEntry {
     lastId: number;
     lastAt: number;
@@ -45,10 +51,43 @@ async function upsertBatched(
     onConflict: string
 ): Promise<void> {
     if (!rows.length) return;
+
+    const toExclude = excludedCols.get(table) ?? new Set<string>();
+
+    const strip = (r: any): any => {
+        if (!toExclude.size) return r;
+        return Object.fromEntries(Object.entries(r).filter(([k]) => !toExclude.has(k)));
+    };
+
     for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-        const batch = rows.slice(i, i + BATCH_SIZE);
-        const { error } = await supabase.from(table).upsert(batch, { onConflict });
-        if (error) throw new Error(`Supabase upsert error on "${table}": ${error.message}`);
+        let batch = rows.slice(i, i + BATCH_SIZE).map(strip);
+
+        // Retry loop: each iteration strips one more unknown column until
+        // the batch succeeds or a non-schema error is thrown.
+        while (true) {
+            const { error } = await supabase.from(table).upsert(batch, { onConflict });
+            if (!error) break;
+
+            // PostgREST schema-cache miss: "Could not find the 'X' column of 'Y'"
+            const m = error.message.match(/Could not find the '(\w+)' column/);
+            if (m) {
+                const col = m[1];
+                if (!excludedCols.has(table)) excludedCols.set(table, new Set());
+                excludedCols.get(table)!.add(col);
+                toExclude.add(col);
+                log.warn(
+                    `Supabase "${table}": column "${col}" not in remote schema — ` +
+                    `stripping from sync. Run the latest supabase-schema.sql migration to resolve.`
+                );
+                batch = batch.map((r: any) => {
+                    const out = { ...r };
+                    delete out[col];
+                    return out;
+                });
+            } else {
+                throw new Error(`Supabase upsert error on "${table}": ${error.message}`);
+            }
+        }
     }
 }
 

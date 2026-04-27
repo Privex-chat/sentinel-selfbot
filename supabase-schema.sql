@@ -264,6 +264,7 @@ CREATE TABLE IF NOT EXISTS public.messages (
     emoji_count         INTEGER,
     mention_count       INTEGER,
     link_count          INTEGER,
+    source              TEXT    NOT NULL DEFAULT 'live',  -- 'live' | 'backfilled'
 
     CONSTRAINT fk_messages_target
         FOREIGN KEY (target_id) REFERENCES public.targets (user_id)
@@ -272,7 +273,8 @@ CREATE TABLE IF NOT EXISTS public.messages (
 
     CONSTRAINT messages_has_sticker_bool CHECK (has_sticker IN (0, 1)),
     CONSTRAINT messages_is_reply_bool    CHECK (is_reply    IN (0, 1)),
-    CONSTRAINT messages_content_length   CHECK (content_length IS NULL OR content_length >= 0)
+    CONSTRAINT messages_content_length   CHECK (content_length IS NULL OR content_length >= 0),
+    CONSTRAINT messages_source_valid     CHECK (source IN ('live', 'backfilled'))
 );
 
 COMMENT ON TABLE  public.messages              IS 'Snapshot of each observed message, including edits and deletions.';
