@@ -34,7 +34,7 @@ export async function categorizeUncategorizedBatch(targetId: string): Promise<nu
 
     try {
         const prompt = messageCategoryPrompt(messages);
-        const raw = await ai.complete(SYSTEM_PROMPT, prompt, 1024);
+        const raw = await ai.complete(SYSTEM_PROMPT, prompt, 2048);
         const parsed = extractJsonArray(raw);
         results = parsed as { id: string; category: string; confidence: number }[];
     } catch (err: any) {
