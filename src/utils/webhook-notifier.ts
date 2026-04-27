@@ -38,6 +38,18 @@ function post(embeds: Embed[], content?: string, label = "notifier"): void {
     enqueueWebhook(url, body, label);
 }
 
+function postCritical(embeds: Embed[], label = "critical"): void {
+    const url = config.criticalWebhookUrl || config.alertWebhookUrl;
+    if (!url) return;
+
+    const isDiscord = DISCORD_RE.test(url);
+    const body = isDiscord
+        ? JSON.stringify({ username: "Sentinel Errors", embeds })
+        : JSON.stringify({ embeds, timestamp: Date.now() });
+
+    enqueueWebhook(url, body, label);
+}
+
 export function notifyStartup(opts: {
     guildCount: number;
     targetCount: number;
@@ -77,20 +89,29 @@ export function notifyShutdown(reason?: string): void {
     }], undefined, "shutdown");
 }
 
-export function notifyCriticalError(message: string, context?: string): void {
-    if (!config.alertWebhookUrl) return;
+export function notifyCriticalError(
+    message: string,
+    context?: string,
+    errorType = "System"
+): void {
+    const url = config.criticalWebhookUrl || config.alertWebhookUrl;
+    if (!url) return;
 
-    const fields: EmbedField[] = [];
-    if (context) fields.push({ name: "Context", value: context.slice(0, 1000) });
+    const fields: EmbedField[] = [
+        { name: "Type", value: errorType, inline: true },
+    ];
+    if (context) fields.push({ name: "Details", value: `\`\`\`${context.slice(0, 900)}\`\`\`` });
 
-    post([{
-        title:       "Critical Error",
+    postCritical([{
+        title:       `Critical Error — ${errorType}`,
         description: `\`\`\`${message.slice(0, 1500)}\`\`\``,
         color:       COLOR.red,
         fields,
         footer:      { text: "Sentinel" },
         timestamp:   new Date().toISOString(),
-    }], undefined, "critical-error");
+    }], `critical:${errorType.toLowerCase().replace(/\s+/g, "-")}`);
+
+    log.error(`[CRITICAL:${errorType}] ${message}`);
 }
 
 export function notifyDailySummary(

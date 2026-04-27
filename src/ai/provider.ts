@@ -1,5 +1,6 @@
 import { config } from "../utils/config";
 import { createLogger } from "../utils/logger";
+import { notifyCriticalError } from "../utils/webhook-notifier";
 
 const log = createLogger("AIProvider");
 
@@ -69,7 +70,9 @@ export class OpenAICompatibleProvider implements AIProvider {
             return content.trim();
         }
 
-        throw new Error("OpenAI-compatible: exhausted all retries");
+        const msg = "OpenAI-compatible API: exhausted all retries on transient errors";
+        notifyCriticalError(msg, undefined, "AI Provider");
+        throw new Error(msg);
     }
 }
 
@@ -114,7 +117,9 @@ export class AnthropicProvider implements AIProvider {
             return content.trim();
         }
 
-        throw new Error("Anthropic: exhausted all retries");
+        const msg = "Anthropic API: exhausted all retries on transient errors";
+        notifyCriticalError(msg, undefined, "AI Provider");
+        throw new Error(msg);
     }
 }
 
@@ -223,10 +228,9 @@ export class GeminiProvider implements AIProvider {
                 const delayMs = parseGeminiRetryDelayMs(parsed);
 
                 if (attempt === GeminiProvider.MAX_RETRIES) {
-                    throw new Error(
-                        `Gemini API rate limit exceeded after ${GeminiProvider.MAX_RETRIES} attempts. ` +
-                        `Consider increasing AI_ANALYSIS_INTERVAL_MS or reducing AI_CATEGORIZATION_BATCH_SIZE.`
-                    );
+                    const msg = `Gemini API rate limit exceeded after ${GeminiProvider.MAX_RETRIES} attempts. Consider increasing AI_ANALYSIS_INTERVAL_MS or reducing AI_CATEGORIZATION_BATCH_SIZE.`;
+                    notifyCriticalError(msg, undefined, "AI Provider");
+                    throw new Error(msg);
                 }
 
                 log.warn(
@@ -280,8 +284,9 @@ export class GeminiProvider implements AIProvider {
             return content.trim();
         }
 
-        // TypeScript requires an explicit throw after the loop
-        throw new Error("Gemini: exhausted all retries");
+        const msg = "Gemini API: exhausted all retries on transient errors";
+        notifyCriticalError(msg, undefined, "AI Provider");
+        throw new Error(msg);
     }
 }
 

@@ -1,6 +1,9 @@
 import { createLogger } from "./logger";
+import { notifyCriticalError } from "./webhook-notifier";
 
 const log = createLogger("RateLimiter");
+
+let discordAuthFailedNotified = false;
 
 interface RateLimitBucket {
     remaining: number;
@@ -93,6 +96,16 @@ export async function discordFetch(
             rateLimiter.handleRetryAfter(retryMs, !!body.global);
             await new Promise(resolve => setTimeout(resolve, retryMs));
             continue;
+        }
+
+        // 401 Unauthorized — token is invalid or was rotated
+        if (res.status === 401 && !discordAuthFailedNotified) {
+            discordAuthFailedNotified = true;
+            notifyCriticalError(
+                `Discord REST API returned 401 Unauthorized on route: ${route}. Token may have been rotated or invalidated.`,
+                undefined,
+                "Discord Auth"
+            );
         }
 
         // Transient server errors — retry with backoff before giving up

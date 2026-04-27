@@ -82,7 +82,8 @@ export const config = {
     alertDigestMode:       process.env.ALERT_DIGEST_MODE === "true",
     alertDigestIntervalMs: parseInt(process.env.ALERT_DIGEST_INTERVAL_MS || "900000", 10),
     alertFatigueThreshold: parseInt(process.env.ALERT_FATIGUE_THRESHOLD || "20", 10),
-    alertWebhookUrl:       process.env.ALERT_WEBHOOK_URL || "",
+    alertWebhookUrl:       process.env.ALERT_WEBHOOK_URL    || "",
+    criticalWebhookUrl:    process.env.CRITICAL_WEBHOOK_URL || "",
 
     // ── Briefs ────────────────────────────────────────────────────────────────
     briefGenerationTime:   process.env.BRIEF_GENERATION_TIME || "07:00",

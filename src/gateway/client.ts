@@ -5,6 +5,7 @@ import { config } from "../utils/config";
 import { GatewayOpcodes, RESUMABLE_CLOSE_CODES } from "./intents";
 import { HeartbeatManager } from "./heartbeat";
 import { ReconnectManager } from "./reconnect";
+import { notifyCriticalError } from "../utils/webhook-notifier";
 
 const log = createLogger("Gateway");
 const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
@@ -314,6 +315,11 @@ export class GatewayClient extends EventEmitter {
     private handleDisconnect(code: number): void {
         if (code === 4004) {
             log.error("Authentication failed. Check your token.");
+            notifyCriticalError(
+                "Discord authentication failed (close code 4004). Your token may have been rotated, invalidated, or is incorrect. The selfbot will NOT reconnect.",
+                undefined,
+                "Discord Auth"
+            );
             return;
         }
         if (code === 4013 || code === 4014) {
