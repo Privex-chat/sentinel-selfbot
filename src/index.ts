@@ -500,6 +500,10 @@ async function main(): Promise<void> {
 
     gateway = new GatewayClient();
     setupGatewayHandlers(gateway);
+    gateway.on("error", (err: Error) => {
+        log.error(`Gateway client error: ${err.message}`);
+        // Non-fatal — the gateway's reconnect loop handles recovery.
+    });
     await gateway.connect();
 
     startProfilePoller();
