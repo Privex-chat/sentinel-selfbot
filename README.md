@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="demo.gif" alt="Selfbot collecting data" width="720">
+  <img src="https://github.com/Privex-chat/sentinel/blob/8f32961fea344aefe68157d298e1392ceeb316b5/assets/Sentinel_Logging_Targets_Messages.PNG" alt="Selfbot collecting data" width="720">
 </p>
 <table align="center">
   <tr>
