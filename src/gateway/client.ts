@@ -153,7 +153,13 @@ export class GatewayClient extends EventEmitter {
 
         this.ws.on("error", (error: Error) => {
             log.error(`WebSocket error: ${error.message}`);
-            this.emit("error", error);
+            if (/Unexpected server response: 5\d\d/.test(error.message ?? "")) {
+                log.warn("Transient gateway 5xx — clearing resume URL, falling back to primary gateway");
+                this.resumeGatewayUrl = null;
+            }
+            if (this.listenerCount("error") > 0) {
+                this.emit("error", error);
+            }
         });
     }
 
