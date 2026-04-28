@@ -1,7 +1,7 @@
 <p align="center">
   <img src="demo.gif" alt="Selfbot collecting data" width="720">
 </p>
-
+Part of the [Sentinel](https://github.com/Privex-chat/sentinel) project.
 <table align="center">
   <tr>
     <td>
