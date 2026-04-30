@@ -25,9 +25,10 @@ export function setSelfbotGuildsFn(fn: () => any[]): void {
  * staggered so we don't spike the 120 ops / 60 s gateway rate limit.
  *
  * NOTE: GUILD_MEMBERS_CHUNK presences only include ACTIVE (non-offline) users.
- * Absence from a chunk does NOT mean offline, so the chunk handler in index.ts
- * never forces a status correction based on chunk absence. This poll is purely
- * for refreshing online status in case a PRESENCE_UPDATE was missed.
+ * Absence from a user_ids-targeted chunk DOES mean the user is offline/invisible,
+ * and the chunk handler in index.ts marks them offline accordingly. This poll
+ * therefore serves a dual purpose: refreshing online status in case a
+ * PRESENCE_UPDATE was missed, and catching offline transitions via chunk absence.
  */
 function pollPresences(): void {
     if (!requestGuildMembersFn) return;

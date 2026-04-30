@@ -58,6 +58,12 @@ function prepareStatements() {
         closePresenceSession: db.prepare(
             "UPDATE presence_sessions SET end_time = ?, duration_ms = ? - start_time WHERE id = ?"
         ),
+        // Closes ALL open presence sessions for a target in one statement.
+        // Preferred over getOpenPresenceSession + closePresenceSession (which only
+        // closes one row and silently leaves orphaned sessions if duplicates exist).
+        closeAllOpenPresenceSessions: db.prepare(
+            "UPDATE presence_sessions SET end_time = ?, duration_ms = ? - start_time WHERE target_id = ? AND end_time IS NULL"
+        ),
         getOpenPresenceSession: db.prepare(
             "SELECT * FROM presence_sessions WHERE target_id = ? AND end_time IS NULL ORDER BY start_time DESC LIMIT 1"
         ),

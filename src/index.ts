@@ -420,12 +420,15 @@ function setupGatewayHandlers(client: GatewayClient): void {
                                 // presences in this targeted chunk → they've gone offline.
                                 // Drive through handlePresenceUpdate so the session is closed,
                                 // an event is inserted, and SSE + alert engine are notified.
+                                // Also flush activities so currentActivities doesn't retain
+                                // stale "active" entries after the user goes offline.
                                 log.info(`${userId}: absent from GUILD_MEMBERS_CHUNK presences (was ${existing.status}) — marking offline`);
                                 handlePresenceUpdate(userId, {
                                     status: "offline",
                                     client_status: {},
                                     activities: [],
                                 });
+                                handleActivityUpdate(userId, []);
                             }
                             // If already offline or unknown: do nothing.
                         }

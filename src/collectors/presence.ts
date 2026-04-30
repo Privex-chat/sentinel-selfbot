@@ -43,16 +43,20 @@ export function handlePresenceUpdate(targetId: string, data: any): void {
     // No change — skip
     if (oldStatus === newStatus && oldPlatform === platform) return;
 
-    // Close the current open presence session
+    // Close ALL open presence sessions for this target (not just the most
+    // recent one). Using the close-all statement prevents orphaned open rows
+    // if duplicates were ever created by a previous bug or process restart.
     if (oldStatus !== "unknown") {
-        const openSession = stmts.getOpenPresenceSession.get(targetId) as any;
-        if (openSession) {
-            stmts.closePresenceSession.run(now, now, openSession.id);
-        }
+        stmts.closeAllOpenPresenceSessions.run(now, now, targetId);
     }
 
-    // Open a new session for the new status
-    stmts.insertPresenceSession.run(targetId, newStatus, platform, now);
+    // Open a new session for the new status — but skip if this is the very
+    // first observation (unknown) and the user is already offline. In that
+    // case there is no meaningful "start" to record; the next real transition
+    // (offline → online) will open a proper session.
+    if (!(oldStatus === "unknown" && newStatus === "offline")) {
+        stmts.insertPresenceSession.run(targetId, newStatus, platform, now);
+    }
 
     // Store processed event data (camelCase) for consistency with alert engine
     const eventData = JSON.stringify({
