@@ -17,11 +17,19 @@ export function handleProfileUpdate(targetId: string, userData: any, profileData
     const bio = profileData?.bio || userData.bio || null;
     const pronouns = profileData?.pronouns || null;
     const accentColor = userData.accent_color ?? profileData?.accent_color ?? null;
-    const connectedAccountsJson = connectedAccounts ? JSON.stringify(connectedAccounts) : null;
-    const mutualGuildsJson = mutualGuilds ? JSON.stringify(mutualGuilds) : null;
-
-    // Get latest snapshot for comparison
+    // Fetch last snapshot early so we can preserve fields not included in this
+    // update (e.g. when the caller used the basic /users/{id} endpoint because
+    // the full profile endpoint returned 404 due to no mutual servers).
     const lastSnapshot = stmts.getLatestSnapshot.get(targetId) as any;
+
+    // Use `!== undefined` (not truthiness) so an explicit empty array is
+    // written as-is, while `undefined` means "not provided — keep last value".
+    const connectedAccountsJson = connectedAccounts !== undefined
+        ? JSON.stringify(connectedAccounts)
+        : (lastSnapshot?.connected_accounts ?? null);
+    const mutualGuildsJson = mutualGuilds !== undefined
+        ? JSON.stringify(mutualGuilds)
+        : (lastSnapshot?.mutual_guilds ?? null);
 
     const changes: string[] = [];
     if (lastSnapshot) {

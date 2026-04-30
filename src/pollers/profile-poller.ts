@@ -9,12 +9,43 @@ const log = createLogger("ProfilePoller");
 
 let intervalHandle: NodeJS.Timeout | null = null;
 
+/**
+ * Fall back to the basic /users/{id} endpoint when the full profile endpoint
+ * returns 404 (selfbot shares no mutual servers with the target). Stores
+ * username / avatar so change-tracking still works. Does NOT overwrite the
+ * existing mutual_guilds value in the snapshot — profile.ts preserves it when
+ * mutualGuilds is passed as undefined.
+ */
+async function pollTargetBasic(targetId: string): Promise<void> {
+    try {
+        const res = await discordFetch(`/users/${targetId}`, config.discordToken);
+        if (!res.ok) {
+            log.warn(`Failed to fetch basic user info for ${targetId}: ${res.status}`);
+            return;
+        }
+        const userData = await res.json() as any;
+        // Pass undefined for optional params — profile.ts will preserve existing
+        // connected_accounts / mutual_guilds from the last snapshot.
+        handleProfileUpdate(targetId, userData, undefined, undefined, undefined);
+    } catch (err: any) {
+        log.error(`Basic user fetch error for ${targetId}: ${err.message}`);
+    }
+}
+
 async function pollTarget(targetId: string): Promise<void> {
     try {
         const res = await discordFetch(
             `/users/${targetId}/profile?with_mutual_guilds=true&with_mutual_friends_count=false`,
             config.discordToken
         );
+
+        if (res.status === 404) {
+            // 404 = selfbot shares no mutual servers with this user.
+            // Fall back to basic user info so username/avatar are still tracked.
+            log.debug(`Profile endpoint 404 for ${targetId} (no mutual servers) — using basic user endpoint`);
+            await pollTargetBasic(targetId);
+            return;
+        }
 
         if (!res.ok) {
             log.warn(`Failed to fetch profile for ${targetId}: ${res.status}`);

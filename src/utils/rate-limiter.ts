@@ -1,5 +1,6 @@
 import { createLogger } from "./logger";
 import { notifyCriticalError } from "./webhook-notifier";
+import { chosenProfile, superPropertiesHeader } from "./discord-properties";
 
 const log = createLogger("RateLimiter");
 
@@ -79,8 +80,14 @@ export async function discordFetch(
         const res = await fetch(url, {
             ...options,
             headers: {
-                Authorization: token,
-                "Content-Type": "application/json",
+                Authorization:        token,
+                "Content-Type":       "application/json",
+                // These headers are required for Discord's undocumented user-account
+                // endpoints (e.g. /users/{id}/profile). Without them Discord returns
+                // 404 even when the selfbot shares mutual servers with the target.
+                "User-Agent":         chosenProfile.browser_user_agent,
+                "X-Super-Properties": superPropertiesHeader,
+                "X-Discord-Locale":   "en-US",
                 ...options.headers,
             },
         });

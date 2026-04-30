@@ -6,89 +6,15 @@ import { GatewayOpcodes, RESUMABLE_CLOSE_CODES } from "./intents";
 import { HeartbeatManager } from "./heartbeat";
 import { ReconnectManager } from "./reconnect";
 import { notifyCriticalError } from "../utils/webhook-notifier";
+import { getIdentifyProperties } from "../utils/discord-properties";
 
 const log = createLogger("Gateway");
 const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
 const GATEWAY_RATE_LIMIT = 120;
 const GATEWAY_RATE_PERIOD = 60_000;
 
-// ── Browser / OS profiles used in the IDENTIFY payload ───────────────────────
-// The active profile is selected ONCE at process startup (see _chosenProfile
-// below). When RANDOM_JITTER=true the pick is random, providing deployment
-// diversity across Railway restarts. Critically, the same profile is reused on
-// every IDENTIFY and RESUME within a single process lifetime — Discord ties a
-// session to the fingerprint used at IDENTIFY time, so rotating the profile on
-// reconnect causes Discord to reject RESUME with INVALID_SESSION(resumable=false)
-// and forces a full re-IDENTIFY, which creates a presence-event gap.
-const BROWSER_PROFILES = [
-    {
-        os: "Windows",
-        browser: "Chrome",
-        browser_user_agent:
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-        browser_version: "133.0.0.0",
-        os_version: "10",
-        client_build_number: 368849,
-    },
-    {
-        os: "Windows",
-        browser: "Chrome",
-        browser_user_agent:
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-        browser_version: "132.0.0.0",
-        os_version: "10",
-        client_build_number: 367905,
-    },
-    {
-        os: "Mac OS X",
-        browser: "Chrome",
-        browser_user_agent:
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-        browser_version: "133.0.0.0",
-        os_version: "10.15.7",
-        client_build_number: 368849,
-    },
-    {
-        os: "Windows",
-        browser: "Chrome",
-        browser_user_agent:
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        browser_version: "131.0.0.0",
-        os_version: "10",
-        client_build_number: 366994,
-    },
-    {
-        os: "Mac OS X",
-        browser: "Chrome",
-        browser_user_agent:
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-        browser_version: "132.0.0.0",
-        os_version: "10.15.7",
-        client_build_number: 367905,
-    },
-] as const;
-
-// Chosen once per process. Do NOT move this into pickIdentifyProperties().
-const _chosenProfile = config.randomJitter
-    ? BROWSER_PROFILES[Math.floor(Math.random() * BROWSER_PROFILES.length)]
-    : BROWSER_PROFILES[0];
-
-function pickIdentifyProperties() {
-    return {
-        os: _chosenProfile.os,
-        browser: _chosenProfile.browser,
-        device: "",
-        system_locale: "en-US",
-        browser_user_agent: _chosenProfile.browser_user_agent,
-        browser_version: _chosenProfile.browser_version,
-        os_version: _chosenProfile.os_version,
-        referrer: "",
-        referring_domain: "",
-        release_channel: "stable",
-        client_build_number: _chosenProfile.client_build_number,
-        client_event_source: null,
-    };
-}
+// Browser profile and identify properties are defined in utils/discord-properties.ts
+// and shared with the REST layer (discordFetch headers). See that module for details.
 
 // ── Public interface ──────────────────────────────────────────────────────────
 export interface GatewayClient {
@@ -239,7 +165,7 @@ export class GatewayClient extends EventEmitter {
     }
 
     private identify(): void {
-        const properties = pickIdentifyProperties();
+        const properties = getIdentifyProperties();
         log.info(`Sending IDENTIFY (browser: ${properties.browser} on ${properties.os})`);
         this.send(GatewayOpcodes.IDENTIFY, {
             token: config.discordToken,

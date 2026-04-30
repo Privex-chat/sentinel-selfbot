@@ -25,16 +25,37 @@ const pausedTargets = new Set<string>();
  * Returns the mutual_guilds array, or null if the fetch fails.
  */
 async function fetchAndStoreProfile(targetId: string): Promise<any[] | null> {
-    log.info(`No profile snapshot for ${targetId} — fetching profile before backfill`);
+    log.info(`Fetching Discord profile for ${targetId}`);
     try {
         const res = await discordFetch(
             `/users/${targetId}/profile?with_mutual_guilds=true&with_mutual_friends_count=false`,
             config.discordToken
         );
 
+        if (res.status === 404) {
+            // 404 = selfbot shares no mutual servers with this user.
+            // Fall back to the basic user endpoint so we at least store
+            // username / avatar. Return [] (not null) so the caller knows the
+            // user exists but has no guilds to backfill (not a hard failure).
+            log.info(`Profile endpoint 404 for ${targetId} — no mutual servers. Storing basic user info.`);
+            try {
+                const basicRes = await discordFetch(`/users/${targetId}`, config.discordToken);
+                if (basicRes.ok) {
+                    const basicData = await basicRes.json() as any;
+                    // undefined for optional params → profile.ts preserves existing mutual_guilds
+                    handleProfileUpdate(targetId, basicData, undefined, undefined, undefined);
+                } else {
+                    log.warn(`Failed to fetch basic user info for ${targetId}: ${basicRes.status}`);
+                }
+            } catch (basicErr: any) {
+                log.warn(`Basic user fetch error for ${targetId}: ${basicErr.message}`);
+            }
+            return []; // empty = no guilds to backfill, not an error
+        }
+
         if (!res.ok) {
             log.warn(`Failed to fetch profile for ${targetId}: HTTP ${res.status}`);
-            return null;
+            return null; // null = hard failure
         }
 
         const data = await res.json() as any;
@@ -244,7 +265,7 @@ export async function startBackfillForTarget(targetId: string): Promise<void> {
         }
 
         if (!mutualGuilds.length) {
-            log.warn(`No mutual guilds found for ${targetId} (not sharing any servers), skipping backfill`);
+            log.info(`No mutual guilds found for ${targetId} — selfbot shares no servers with this user. Backfill skipped.`);
             return;
         }
 
@@ -323,7 +344,7 @@ export async function customBackfillForTarget(
             .filter(Boolean) as string[];
 
         if (!allGuildIds.length) {
-            log.warn(`No mutual guilds for ${targetId} — custom backfill finished with nothing to do`);
+            log.info(`No mutual guilds for ${targetId} — selfbot shares no servers with this user. Custom backfill skipped.`);
             return;
         }
 
