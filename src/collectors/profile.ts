@@ -41,10 +41,14 @@ export function handleProfileUpdate(targetId: string, userData: any, profileData
         if (lastSnapshot.pronouns !== pronouns && pronouns !== null) changes.push(`pronouns: ${lastSnapshot.pronouns} -> ${pronouns}`);
         if (lastSnapshot.discriminator !== discriminator && discriminator) changes.push(`discriminator: ${lastSnapshot.discriminator} -> ${discriminator}`);
 
-        if (connectedAccountsJson && lastSnapshot.connected_accounts) {
+        // Only diff connected accounts when this update actually provided them.
+        // `undefined` means the caller (GUILD_MEMBERS_CHUNK, basic /users/{id})
+        // didn't include connected accounts — skip the diff entirely.
+        // `[]` means Discord explicitly said "no connected accounts" — diff normally.
+        if (connectedAccounts !== undefined && lastSnapshot.connected_accounts) {
             try {
                 const oldAccounts = JSON.parse(lastSnapshot.connected_accounts);
-                const newAccounts = connectedAccounts || [];
+                const newAccounts = connectedAccounts;
                 const oldTypes = new Set(oldAccounts.map((a: any) => a.type));
                 const newTypes = new Set(newAccounts.map((a: any) => a.type));
                 for (const t of newTypes) {
