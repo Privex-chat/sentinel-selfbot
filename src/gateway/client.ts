@@ -42,10 +42,11 @@ export class GatewayClient extends EventEmitter {
 
     private pendingRateLimitTimers: Set<NodeJS.Timeout> = new Set();
 
-    getUser()      { return this.user; }
-    getGuilds()    { return this.guilds; }
-    getSessionId() { return this.sessionId; }
-    isConnected()  { return this.connected; }
+    getUser()             { return this.user; }
+    getGuilds()           { return this.guilds; }
+    getSessionId()        { return this.sessionId; }
+    isConnected()         { return this.connected; }
+    getHeartbeatLatency() { return this.heartbeat.getLatencyMs(); }
 
     // ── Connection ─────────────────────────────────────────────────────────────
     async connect(): Promise<void> {

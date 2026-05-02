@@ -11,6 +11,13 @@ export class HeartbeatManager {
     private onZombied: (() => void) | null = null;
     private sequenceFn: (() => number | null) | null = null;
 
+    // Latency tracking — measured as time between sending a heartbeat and receiving its ACK.
+    private beatSentAt  = 0;
+    private latencyMs: number | null = null;
+
+    /** Last measured gateway heartbeat round-trip latency in ms, or null if not yet measured. */
+    getLatencyMs(): number | null { return this.latencyMs; }
+
     setup(
         intervalMs: number,
         sendFn: (op: number, d: any) => void,
@@ -35,8 +42,11 @@ export class HeartbeatManager {
     }
 
     ack(): void {
+        if (this.beatSentAt > 0) {
+            this.latencyMs = Date.now() - this.beatSentAt;
+        }
         this.lastAck = true;
-        log.debug("Heartbeat ACK received");
+        log.debug(`Heartbeat ACK received (latency: ${this.latencyMs ?? "?"}ms)`);
     }
 
     private beat(): void {
@@ -47,6 +57,7 @@ export class HeartbeatManager {
         }
 
         this.lastAck = false;
+        this.beatSentAt = Date.now();
         const seq = this.sequenceFn?.() ?? null;
         this.sendFn?.(1, seq);
         log.debug(`Heartbeat sent (seq: ${seq})`);

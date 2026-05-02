@@ -70,6 +70,27 @@ function prepareStatements() {
         getPresenceSessions: db.prepare(
             "SELECT * FROM presence_sessions WHERE target_id = ? AND start_time >= ? AND start_time <= ? ORDER BY start_time DESC"
         ),
+        // Most recent closed session where the user was NOT offline (for $seen command).
+        getLastSeenOnline: db.prepare(
+            `SELECT * FROM presence_sessions
+             WHERE target_id = ? AND status != 'offline' AND end_time IS NOT NULL
+             ORDER BY end_time DESC LIMIT 1`
+        ),
+        // Sum of active (non-offline) presence time starting from a given epoch ms.
+        // For open sessions (end_time IS NULL) the current time is substituted via param 1.
+        // Param order: now_ms, target_id, window_start_ms
+        getTodayActiveMs: db.prepare(
+            `SELECT COALESCE(SUM(
+                 CASE WHEN end_time IS NOT NULL THEN duration_ms
+                      ELSE ? - start_time END
+             ), 0) AS total_ms
+             FROM presence_sessions
+             WHERE target_id = ? AND status IN ('online', 'idle', 'dnd') AND start_time >= ?`
+        ),
+        // Last N presence sessions in reverse chronological order (for $history command).
+        getRecentPresenceSessions: db.prepare(
+            "SELECT * FROM presence_sessions WHERE target_id = ? ORDER BY start_time DESC LIMIT ?"
+        ),
 
         // ── Activity sessions ──────────────────────────────────────────────────
         insertActivitySession: db.prepare(

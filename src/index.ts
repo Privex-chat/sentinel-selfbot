@@ -21,7 +21,7 @@ import {
 } from "./collectors/voice";
 import { handleProfileUpdate } from "./collectors/profile";
 import { handleReactionAdd, handleReactionRemove } from "./collectors/reaction";
-import { handleSelfCommand } from "./commands/handler";
+import { handleSelfCommand, setGatewayRef } from "./commands/handler";
 import { handleGuildMemberUpdate } from "./collectors/guild-member";
 import { handleChannelCreate } from "./collectors/dm-detection";
 import { startProfilePoller, stopProfilePoller } from "./pollers/profile-poller";
@@ -642,6 +642,7 @@ async function main(): Promise<void> {
     startHeartbeatLogger();
 
     gateway = new GatewayClient();
+    setGatewayRef(gateway);
     setupGatewayHandlers(gateway);
     await gateway.connect();
 
@@ -708,6 +709,7 @@ async function main(): Promise<void> {
         const old = gateway;
         old?.destroy();
         gateway = new GatewayClient();
+        setGatewayRef(gateway);
         setupGatewayHandlers(gateway);
         startVoiceParticipantTracker(gateway);
         gateway.connect().catch(err => log.error(`Gateway reconnect error: ${err.message}`));
