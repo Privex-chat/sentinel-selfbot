@@ -21,6 +21,7 @@ import {
 } from "./collectors/voice";
 import { handleProfileUpdate } from "./collectors/profile";
 import { handleReactionAdd, handleReactionRemove } from "./collectors/reaction";
+import { handleSelfCommand } from "./commands/handler";
 import { handleGuildMemberUpdate } from "./collectors/guild-member";
 import { handleChannelCreate } from "./collectors/dm-detection";
 import { startProfilePoller, stopProfilePoller } from "./pollers/profile-poller";
@@ -249,7 +250,7 @@ function subscribeGuildPresences(client: GatewayClient): void {
 // ── Gateway: event handler ────────────────────────────────────────────────────
 
 function setupGatewayHandlers(client: GatewayClient): void {
-    client.on("dispatch", (eventName: string, data: any) => {
+    client.on("dispatch", async (eventName: string, data: any) => {
         try {
             switch (eventName) {
 
@@ -268,6 +269,15 @@ function setupGatewayHandlers(client: GatewayClient): void {
                 // Keep pushing raw Discord message data — the live feed needs
                 // `content` which isn't in the processed event data.
                 case "MESSAGE_CREATE": {
+                    // Self-commands ($add, $remove, $status, $list, $help).
+                    // Must run before the isTarget guard — the selfbot's own
+                    // account is never in the targets list.
+                    const selfUser = client.getUser();
+                    if (selfUser?.id && data.author?.id === selfUser.id) {
+                        const handled = await handleSelfCommand(selfUser.id, data);
+                        if (handled) break;
+                    }
+
                     const authorId = data.author?.id;
                     if (!authorId || !isTarget(authorId)) break;
                     if (data.author.bot) break;
