@@ -1,5 +1,7 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
+import { getDb } from "../database/connection";
+import { getHourInTimezone, getDayInTimezone } from "../utils/timezone";
 
 const log = createLogger("RoutineDetector");
 
@@ -21,6 +23,10 @@ export function detectRoutine(targetId: string, weeks: number = 4): RoutinePatte
     const stmts = getStmts();
     const since = Date.now() - weeks * 7 * 86400000;
 
+    const target = getDb().prepare("SELECT timezone FROM targets WHERE user_id = ?")
+        .get(targetId) as { timezone: string | null } | undefined;
+    const tz = target?.timezone ?? null;
+
     const events = stmts.getEventsFiltered.all(targetId, since, Date.now(), 50000, 0) as any[];
 
     // Build 7x24 grid
@@ -30,9 +36,8 @@ export function detectRoutine(targetId: string, weeks: number = 4): RoutinePatte
         );
 
     for (const event of events) {
-        const d = new Date(event.timestamp);
-        const dow = d.getDay();
-        const hour = d.getHours();
+        const dow = getDayInTimezone(event.timestamp, tz);
+        const hour = getHourInTimezone(event.timestamp, tz);
         grid[dow][hour].count++;
         grid[dow][hour].types[event.event_type] = (grid[dow][hour].types[event.event_type] || 0) + 1;
     }
@@ -70,9 +75,9 @@ export function detectRoutine(targetId: string, weeks: number = 4): RoutinePatte
     }
 
     // Find today's anomalies
-    const now = new Date();
-    const todayDow = now.getDay();
-    const currentHour = now.getHours();
+    const now = Date.now();
+    const todayDow = getDayInTimezone(now, tz);
+    const currentHour = getHourInTimezone(now, tz);
     const todayBucket = weeklyGrid[todayDow][currentHour];
     if (!todayBucket.isTypical && todayBucket.eventCount === 0 && mean > 2) {
         anomalies.push(`Unusually quiet for ${dayNames[todayDow]} at ${currentHour}:00`);

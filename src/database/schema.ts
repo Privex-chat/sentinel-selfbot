@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export const CREATE_TABLES_SQL = `
 -- Core tables
@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS targets (
     label TEXT,
     notes TEXT,
     priority INTEGER DEFAULT 0,
-    active INTEGER DEFAULT 1
+    active INTEGER DEFAULT 1,
+    timezone TEXT
 );
 
 CREATE TABLE IF NOT EXISTS events (

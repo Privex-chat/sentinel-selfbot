@@ -13,6 +13,7 @@
  *   $resume <@user>        — re-activate a paused target
  *   $label  <@user> <text> — set display label for a target
  *   $note   <@user> <text> — append a timestamped note to a target
+ *   $timezone <@user> [tz] — view/set timezone for a target
  *   $status <@user>        — current presence & activities
  *   $seen   <@user>        — when the target was last online
  *   $uptime <@user>        — today's total active time
@@ -37,6 +38,7 @@ import { getCurrentPresence } from "../collectors/presence";
 import { getCurrentActivities } from "../collectors/activity";
 import { reloadRules } from "../alerts/engine";
 import { loadRuntimeConfig } from "../runtime-config";
+import { parseTimezone, tzLabel, fmtTimeInTz, fmtDateTimeInTz, getHourInTimezone, getNextLocalHourMs } from "../utils/timezone";
 import type { GatewayClient } from "../gateway/client";
 
 const log = createLogger("Commands");
@@ -69,6 +71,12 @@ function parseUserId(raw: string): string | null {
     if (m) return m[1];
     if (/^\d{17,20}$/.test(raw)) return raw;
     return null;
+}
+
+function getTargetTz(userId: string): string | null {
+    const row = getDb().prepare("SELECT timezone FROM targets WHERE user_id = ?")
+        .get(userId) as { timezone: string | null } | undefined;
+    return row?.timezone ?? null;
 }
 
 /** Human-readable duration from milliseconds. */
@@ -375,9 +383,10 @@ async function cmdSeen(channelId: string, args: string[]): Promise<void> {
 
     const emoji    = STATUS_EMOJI[row.status] ?? "❓";
     const platform = row.platform ? ` on ${row.platform}` : "";
+    const tz       = getTargetTz(userId);
     await sendTempMessage(
         channelId,
-        `⚫ \`${userId}\` last seen **${row.status}**${platform} — **${timeAgo(row.end_time)}** (${fmtDateTime(row.end_time)}).\n` +
+        `⚫ \`${userId}\` last seen **${row.status}**${platform} — **${timeAgo(row.end_time)}** (${fmtDateTimeInTz(row.end_time, tz)}).\n` +
         `${emoji} That session lasted **${fmtDuration(row.duration_ms)}**.`,
         8_000
     );
@@ -424,6 +433,7 @@ async function cmdStreak(channelId: string, args: string[]): Promise<void> {
         return;
     }
 
+    const tz          = getTargetTz(userId);
     const openSession = getStmts().getOpenPresenceSession.get(userId) as any;
 
     if (openSession) {
@@ -433,11 +443,10 @@ async function cmdStreak(channelId: string, args: string[]): Promise<void> {
         await sendTempMessage(
             channelId,
             `${emoji} \`${userId}\` has been **${openSession.status}**${platform} for **${fmtDuration(duration)}**\n` +
-            `(since ${fmtDateTime(openSession.start_time)})`,
+            `(since ${fmtDateTimeInTz(openSession.start_time, tz)})`,
             7_000
         );
     } else {
-        // No open session — find how long they've been offline.
         const lastClosed = getDb()
             .prepare("SELECT end_time FROM presence_sessions WHERE target_id = ? AND end_time IS NOT NULL ORDER BY end_time DESC LIMIT 1")
             .get(userId) as { end_time: number } | undefined;
@@ -446,7 +455,7 @@ async function cmdStreak(channelId: string, args: string[]): Promise<void> {
             await sendTempMessage(
                 channelId,
                 `⚫ \`${userId}\` has been **offline** for **${fmtDuration(Date.now() - lastClosed.end_time)}**\n` +
-                `(since ${fmtDateTime(lastClosed.end_time)})`,
+                `(since ${fmtDateTimeInTz(lastClosed.end_time, tz)})`,
                 7_000
             );
         } else {
@@ -470,11 +479,13 @@ async function cmdHistory(channelId: string, args: string[]): Promise<void> {
         return;
     }
 
+    const tz = getTargetTz(userId);
+
     const lines = sessions.map(s => {
         const emoji    = STATUS_EMOJI[s.status] ?? "❓";
         const platform = s.platform ? `/${s.platform}` : "";
-        const start    = fmtTime(s.start_time);
-        const end      = s.end_time ? fmtTime(s.end_time) : "now";
+        const start    = fmtTimeInTz(s.start_time, tz);
+        const end      = s.end_time ? fmtTimeInTz(s.end_time, tz) : "now";
         const dur      = s.duration_ms
             ? fmtDuration(s.duration_ms)
             : fmtDuration(Date.now() - s.start_time);
@@ -495,8 +506,9 @@ async function cmdPattern(channelId: string, args: string[]): Promise<void> {
         return;
     }
 
-    const now          = Date.now();
-    const windowStart  = now - 30 * 24 * 3_600_000; // 30 days
+    const tz            = getTargetTz(userId);
+    const now           = Date.now();
+    const windowStart   = now - 30 * 24 * 3_600_000;
 
     const sessions = getDb().prepare(
         `SELECT start_time, end_time FROM presence_sessions
@@ -508,17 +520,15 @@ async function cmdPattern(channelId: string, args: string[]): Promise<void> {
         return;
     }
 
-    // Accumulate active milliseconds into 24 hourly buckets (local time).
     const buckets = new Array<number>(24).fill(0);
     for (const s of sessions) {
         let t   = s.start_time;
         const end = s.end_time ?? now;
         while (t < end) {
-            const hour       = new Date(t).getHours();
-            const nextHour   = new Date(new Date(t).setHours(hour + 1, 0, 0, 0)).getTime();
-            const segEnd     = Math.min(nextHour, end);
+            const hour       = getHourInTimezone(t, tz);
+            const segEnd     = Math.min(getNextLocalHourMs(t, tz), end);
             buckets[hour]   += segEnd - t;
-            t                = nextHour;
+            t                = segEnd;
         }
     }
 
@@ -534,13 +544,63 @@ async function cmdPattern(channelId: string, args: string[]): Promise<void> {
     const peakHour  = buckets.indexOf(max);
     const peakLabel = `${String(peakHour).padStart(2, "0")}:00–${String(peakHour + 1).padStart(2, "0")}:00`;
 
+    const tzDisp = tz ? tzLabel(tz) : "local time";
+
     await sendTempMessage(
         channelId,
-        `📈 Hourly activity pattern for \`${userId}\` (last 30 days, local time):\n` +
+        `📈 Hourly activity pattern for \`${userId}\` (last 30 days, ${tzDisp}):\n` +
         `\`\`\`\n${hourLine}\n${barLine}\n\`\`\`` +
         `Peak: **${peakLabel}** (${fmtDuration(max)} total)`,
         14_000
     );
+}
+
+// ── Timezone ──────────────────────────────────────────────────────────────────
+
+async function cmdTimezone(channelId: string, args: string[]): Promise<void> {
+    const userId = args[0] ? parseUserId(args[0]) : null;
+    if (!userId) {
+        await sendTempMessage(channelId, "❌ Usage: `$timezone <@user> <tz>` or `$timezone <@user>` to view\nExamples: `$timezone <@123456789012345678> EST`, `$timezone 123456789012345678 UTC+2`, `$timezone <@user> Europe/Berlin`");
+        return;
+    }
+
+    const db = getDb();
+    const row = db.prepare("SELECT user_id, timezone FROM targets WHERE user_id = ?")
+        .get(userId) as { user_id: string; timezone: string | null } | undefined;
+    if (!row) {
+        await sendTempMessage(channelId, `❌ \`${userId}\` is not a tracked target.`);
+        return;
+    }
+
+    // No tz arg → show current timezone
+    if (args.length < 2) {
+        const current = row.timezone ? `**${row.timezone}** (${tzLabel(row.timezone)})` : "not set (using server time)";
+        await sendTempMessage(channelId, `🕐 Timezone for \`${userId}\`: ${current}`, 6_000);
+        return;
+    }
+
+    // "clear" / "reset" / "none" → remove timezone
+    const tzInput = args.slice(1).join(" ");
+    if (/^(clear|reset|none|remove)$/i.test(tzInput)) {
+        db.prepare("UPDATE targets SET timezone = NULL WHERE user_id = ?").run(userId);
+        await sendTempMessage(channelId, `🕐 Timezone cleared for \`${userId}\` — using server time.`);
+        log.info(`Command: cleared timezone for ${userId}`);
+        return;
+    }
+
+    const parsed = parseTimezone(tzInput);
+    if (!parsed) {
+        await sendTempMessage(
+            channelId,
+            `❌ Unrecognized timezone: \`${tzInput}\`\nTry: \`EST\`, \`UTC+2\`, \`GMT-5\`, \`Europe/Berlin\`, \`Asia/Tokyo\`, or a numeric offset like \`+3\``,
+            8_000,
+        );
+        return;
+    }
+
+    db.prepare("UPDATE targets SET timezone = ? WHERE user_id = ?").run(parsed.canonical, userId);
+    await sendTempMessage(channelId, `🕐 Timezone set for \`${userId}\`: **${parsed.display}**`);
+    log.info(`Command: set timezone for ${userId}: "${parsed.canonical}"`);
 }
 
 // ── List ──────────────────────────────────────────────────────────────────────
@@ -669,6 +729,7 @@ async function cmdHelp(channelId: string): Promise<void> {
         "`$resume <@user>`        — re-activate paused target\n" +
         "`$label <@user> <text>`  — set display label\n" +
         "`$note <@user> <text>`   — append timestamped note\n" +
+        "`$timezone <@user> [tz]` — view/set target timezone\n" +
         "**Intelligence**\n" +
         "`$status <@user>`        — current presence & activities\n" +
         "`$seen <@user>`          — when last online\n" +
@@ -723,6 +784,7 @@ export async function handleSelfCommand(
             case "resume":  await cmdResume(channelId, args);  break;
             case "label":   await cmdLabel(channelId, args);   break;
             case "note":    await cmdNote(channelId, args);     break;
+            case "timezone": await cmdTimezone(channelId, args); break;
             case "status":  await cmdStatus(channelId, args);  break;
             case "seen":    await cmdSeen(channelId, args);     break;
             case "uptime":  await cmdUptime(channelId, args);  break;

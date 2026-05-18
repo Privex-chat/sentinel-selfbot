@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS public.targets (
     notes    TEXT,
     priority INTEGER NOT NULL DEFAULT 0,
     active   INTEGER NOT NULL DEFAULT 1,
+    timezone TEXT,
 
     CONSTRAINT targets_priority_non_negative CHECK (priority >= 0),
     CONSTRAINT targets_active_bool           CHECK (active IN (0, 1))
@@ -44,6 +45,13 @@ COMMENT ON TABLE  public.targets            IS 'Tracked Discord user accounts.';
 COMMENT ON COLUMN public.targets.user_id    IS 'Discord snowflake ID (17-20 digit string).';
 COMMENT ON COLUMN public.targets.added_at   IS 'Unix epoch ms when the target was added.';
 COMMENT ON COLUMN public.targets.active     IS '1 = actively tracked, 0 = paused.';
+
+-- Ensure timezone column exists for re-runs on databases that predate this column.
+DO $$ BEGIN
+    ALTER TABLE public.targets ADD COLUMN timezone TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+COMMENT ON COLUMN public.targets.timezone   IS 'IANA timezone identifier (e.g. Europe/Berlin) or UTC offset (e.g. UTC+2). NULL = server local time.';
 
 
 -- =============================================================================

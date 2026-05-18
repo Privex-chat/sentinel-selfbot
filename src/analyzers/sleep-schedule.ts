@@ -1,5 +1,7 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
+import { getDb } from "../database/connection";
+import { getHourInTimezone, getDayInTimezone, getTimezoneOffsetMinutes, fmtDateInTz } from "../utils/timezone";
 
 const log = createLogger("SleepAnalyzer");
 
@@ -20,19 +22,23 @@ export function analyzeSleepSchedule(targetId: string, days: number = 14): Sleep
     const stmts = getStmts();
     const since = Date.now() - days * 86400000;
 
+    const target = getDb().prepare("SELECT timezone FROM targets WHERE user_id = ?")
+        .get(targetId) as { timezone: string | null } | undefined;
+    const tz = target?.timezone ?? null;
+
     const sessions = stmts.getPresenceSessions.all(targetId, since, Date.now()) as any[];
 
     // Find long offline sessions (>3 hours) as potential sleep periods
-    const sleepSessions: { start: Date; end: Date; duration: number }[] = [];
+    const sleepSessions: { startMs: number; endMs: number; duration: number }[] = [];
 
     for (const session of sessions) {
         if (session.status !== "offline" || !session.end_time) continue;
         const duration = session.duration_ms || (session.end_time - session.start_time);
-        if (duration < 3 * 3600000) continue; // Skip < 3 hours
+        if (duration < 3 * 3600000) continue;
 
         sleepSessions.push({
-            start: new Date(session.start_time),
-            end: new Date(session.end_time),
+            startMs: session.start_time,
+            endMs: session.end_time,
             duration,
         });
     }
@@ -47,23 +53,27 @@ export function analyzeSleepSchedule(targetId: string, days: number = 14): Sleep
         };
     }
 
-    // Extract bedtimes and wake times
-    const bedtimes = sleepSessions.map(s => s.start.getHours() + s.start.getMinutes() / 60);
-    const wakeTimes = sleepSessions.map(s => s.end.getHours() + s.end.getMinutes() / 60);
+    const toFractionalHour = (ms: number) => {
+        const offsetMin = getTimezoneOffsetMinutes(tz, ms);
+        const shifted = new Date(ms + offsetMin * 60_000);
+        return shifted.getUTCHours() + shifted.getUTCMinutes() / 60;
+    };
+
+    const bedtimes = sleepSessions.map(s => toFractionalHour(s.startMs));
+    const wakeTimes = sleepSessions.map(s => toFractionalHour(s.endMs));
     const durations = sleepSessions.map(s => s.duration / 3600000);
 
-    // Separate weekday vs weekend
     const weekdayBed: number[] = [];
     const weekendBed: number[] = [];
     const weekdayWake: number[] = [];
     const weekendWake: number[] = [];
 
     for (const s of sleepSessions) {
-        const day = s.start.getDay();
-        const bedHour = s.start.getHours() + s.start.getMinutes() / 60;
-        const wakeHour = s.end.getHours() + s.end.getMinutes() / 60;
+        const day = getDayInTimezone(s.startMs, tz);
+        const bedHour = toFractionalHour(s.startMs);
+        const wakeHour = toFractionalHour(s.endMs);
 
-        if (day === 0 || day === 6) { // Sunday=0, Saturday=6
+        if (day === 0 || day === 6) {
             weekendBed.push(bedHour);
             weekendWake.push(wakeHour);
         } else {
@@ -76,11 +86,11 @@ export function analyzeSleepSchedule(targetId: string, days: number = 14): Sleep
     const medianBed = median(bedtimes);
     const medianWake = median(wakeTimes);
 
-    // Detect all-nighters (went to sleep after 5am)
     for (const s of sleepSessions) {
-        const h = s.start.getHours();
+        const h = getHourInTimezone(s.startMs, tz);
         if (h >= 5 && h < 12) {
-            irregularities.push(`All-nighter on ${s.start.toISOString().split("T")[0]}`);
+            const dateStr = fmtDateInTz(s.startMs, tz);
+            irregularities.push(`All-nighter on ${dateStr}`);
         }
     }
 
