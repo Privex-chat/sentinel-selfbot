@@ -133,7 +133,13 @@ function applyMigration(version: number): void {
             const db = getDb();
             try {
                 db.exec("ALTER TABLE targets ADD COLUMN timezone TEXT");
-            } catch { /* column may already exist */ }
+            } catch (err: any) {
+                if (!String(err?.message).includes("duplicate column")) throw err;
+            }
+            const cols = db.pragma("table_info('targets')") as { name: string }[];
+            if (!cols.some(c => c.name === "timezone")) {
+                throw new Error("Migration v6 failed: timezone column not found after ALTER");
+            }
             log.info("Migration v6: targets.timezone column added");
             break;
         }

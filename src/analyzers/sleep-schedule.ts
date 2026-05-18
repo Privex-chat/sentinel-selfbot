@@ -1,7 +1,7 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
 import { getDb } from "../database/connection";
-import { getHourInTimezone, getDayInTimezone, getTimezoneOffsetMinutes } from "../utils/timezone";
+import { getHourInTimezone, getDayInTimezone, getTimezoneOffsetMinutes, fmtDateInTz } from "../utils/timezone";
 
 const log = createLogger("SleepAnalyzer");
 
@@ -89,7 +89,7 @@ export function analyzeSleepSchedule(targetId: string, days: number = 14): Sleep
     for (const s of sleepSessions) {
         const h = getHourInTimezone(s.startMs, tz);
         if (h >= 5 && h < 12) {
-            const dateStr = new Date(s.startMs).toISOString().split("T")[0];
+            const dateStr = fmtDateInTz(s.startMs, tz);
             irregularities.push(`All-nighter on ${dateStr}`);
         }
     }

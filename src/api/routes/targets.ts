@@ -108,11 +108,12 @@ export function registerTargetRoutes(app: FastifyInstance): void {
             params.push(body.active ? 1 : 0);
         }
         if ("timezone" in body) {
-            if (body.timezone === null || body.timezone === "") {
+            const tzRaw = typeof body.timezone === "string" ? body.timezone.trim() : body.timezone;
+            if (tzRaw === null || tzRaw === undefined || tzRaw === "") {
                 setParts.push("timezone = ?");
                 params.push(null);
             } else {
-                const parsed = parseTimezone(body.timezone!);
+                const parsed = parseTimezone(tzRaw);
                 if (!parsed) {
                     return reply.code(400).send({ error: `Unrecognized timezone: "${body.timezone}"` });
                 }

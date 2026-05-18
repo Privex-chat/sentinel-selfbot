@@ -137,9 +137,9 @@ export function parseTimezone(input: string): ParsedTimezone | null {
 
     // Plain integer:  "2" → UTC+2, "-3" → UTC-3
     const numVal = Number(raw);
-    if (!Number.isNaN(numVal) && Number.isFinite(numVal) && Math.abs(numVal) <= 14) {
+    if (!Number.isNaN(numVal) && Number.isFinite(numVal) && Number.isInteger(numVal) && Math.abs(numVal) <= 14) {
         const sign = numVal >= 0 ? "+" : "-";
-        return buildFromOffset(sign, Math.abs(Math.trunc(numVal)), 0);
+        return buildFromOffset(sign, Math.abs(numVal), 0);
     }
 
     // Abbreviation lookup (case-insensitive)
@@ -184,11 +184,17 @@ export function getTimezoneOffsetMinutes(tz: string | null | undefined, atMs: nu
     // IANA: use Intl to compute offset including DST
     try {
         const d = new Date(atMs);
-        const utcStr = d.toLocaleString("en-US", { timeZone: "UTC" });
-        const tzStr  = d.toLocaleString("en-US", { timeZone: tz });
-        const utcD   = new Date(utcStr);
-        const tzD    = new Date(tzStr);
-        return Math.round((tzD.getTime() - utcD.getTime()) / 60_000);
+        const extractParts = (timeZone: string) => {
+            const parts = new Intl.DateTimeFormat("en-US", {
+                timeZone,
+                year: "numeric", month: "numeric", day: "numeric",
+                hour: "numeric", minute: "numeric", second: "numeric",
+                hour12: false,
+            }).formatToParts(d);
+            const get = (type: string) => parseInt(parts.find(p => p.type === type)?.value ?? "0", 10);
+            return Date.UTC(get("year"), get("month") - 1, get("day"), get("hour") === 24 ? 0 : get("hour"), get("minute"), get("second"));
+        };
+        return Math.round((extractParts(tz) - extractParts("UTC")) / 60_000);
     } catch {
         return 0;
     }
@@ -291,6 +297,51 @@ export function fmtDateTimeInTz(epochMs: number, tz: string | null | undefined):
         const offsetMin = getTimezoneOffsetMinutes(tz, epochMs);
         const shifted = new Date(epochMs + offsetMin * 60_000);
         return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}-${String(shifted.getUTCDate()).padStart(2, "0")} ${fmtTimeInTz(epochMs, tz)}`;
+    }
+}
+
+/**
+ * Return the epoch-ms of the start of the next local hour in the target's tz.
+ * Used for accurate per-hour bucketing that respects DST and fractional offsets.
+ */
+export function getNextLocalHourMs(epochMs: number, tz: string | null | undefined): number {
+    if (!tz) {
+        const d = new Date(epochMs);
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours() + 1, 0, 0, 0).getTime();
+    }
+
+    const offsetMin = getTimezoneOffsetMinutes(tz, epochMs);
+    const localMs = epochMs + offsetMin * 60_000;
+    const msIntoHour = localMs % 3_600_000;
+    const nextHourUtc = epochMs + (3_600_000 - msIntoHour);
+
+    // Recompute offset at the boundary to handle DST transitions
+    const offsetAtBoundary = getTimezoneOffsetMinutes(tz, nextHourUtc);
+    if (offsetAtBoundary !== offsetMin) {
+        const correctedLocalMs = nextHourUtc + offsetAtBoundary * 60_000;
+        const correctedMsIntoHour = correctedLocalMs % 3_600_000;
+        return nextHourUtc + (correctedMsIntoHour > 0 ? 3_600_000 - correctedMsIntoHour : 0);
+    }
+
+    return nextHourUtc;
+}
+
+export function fmtDateInTz(epochMs: number, tz: string | null | undefined): string {
+    if (!tz) {
+        const d = new Date(epochMs);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    }
+    try {
+        return new Intl.DateTimeFormat("en-CA", {
+            timeZone: tz,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+        }).format(new Date(epochMs));
+    } catch {
+        const offsetMin = getTimezoneOffsetMinutes(tz, epochMs);
+        const shifted = new Date(epochMs + offsetMin * 60_000);
+        return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}-${String(shifted.getUTCDate()).padStart(2, "0")}`;
     }
 }
 

@@ -38,7 +38,7 @@ import { getCurrentPresence } from "../collectors/presence";
 import { getCurrentActivities } from "../collectors/activity";
 import { reloadRules } from "../alerts/engine";
 import { loadRuntimeConfig } from "../runtime-config";
-import { parseTimezone, tzLabel, fmtTimeInTz, fmtDateTimeInTz, getHourInTimezone } from "../utils/timezone";
+import { parseTimezone, tzLabel, fmtTimeInTz, fmtDateTimeInTz, getHourInTimezone, getNextLocalHourMs } from "../utils/timezone";
 import type { GatewayClient } from "../gateway/client";
 
 const log = createLogger("Commands");
@@ -526,7 +526,7 @@ async function cmdPattern(channelId: string, args: string[]): Promise<void> {
         const end = s.end_time ?? now;
         while (t < end) {
             const hour       = getHourInTimezone(t, tz);
-            const segEnd     = Math.min(t + (3_600_000 - (t % 3_600_000)), end);
+            const segEnd     = Math.min(getNextLocalHourMs(t, tz), end);
             buckets[hour]   += segEnd - t;
             t                = segEnd;
         }
@@ -560,7 +560,7 @@ async function cmdPattern(channelId: string, args: string[]): Promise<void> {
 async function cmdTimezone(channelId: string, args: string[]): Promise<void> {
     const userId = args[0] ? parseUserId(args[0]) : null;
     if (!userId) {
-        await sendTempMessage(channelId, "❌ Usage: `$timezone <@user> <tz>` or `$timezone <@user>` to view\nExamples: `$timezone @user EST`, `$timezone @user UTC+2`, `$timezone @user Europe/Berlin`");
+        await sendTempMessage(channelId, "❌ Usage: `$timezone <@user> <tz>` or `$timezone <@user>` to view\nExamples: `$timezone <@123456789012345678> EST`, `$timezone 123456789012345678 UTC+2`, `$timezone <@user> Europe/Berlin`");
         return;
     }
 
