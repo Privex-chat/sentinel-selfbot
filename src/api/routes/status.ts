@@ -5,6 +5,7 @@ import { getCurrentPresence } from "../../collectors/presence";
 import { getCurrentActivities } from "../../collectors/activity";
 import { getCurrentVoiceState } from "../../collectors/voice";
 import { generateBriefForTarget } from "../../briefs/brief-generator";
+import { escapeLikePattern } from "../../utils/like-escape";
 
 const startTime = Date.now();
 
@@ -48,8 +49,11 @@ export function registerStatusRoutes(app: FastifyInstance): void {
         const offset = Math.max(0, parseInt(offsetStr || "0") || 0);
 
         if (search) {
-            let sql = "SELECT * FROM messages WHERE target_id = ? AND content LIKE ?";
-            const params: any[] = [userId, `%${search}%`];
+            // Escape `%`/`_` so client input is a literal substring. Otherwise
+            // a single `%` triggers a full scan of the messages content column.
+            const safeSearch = escapeLikePattern(search);
+            let sql = "SELECT * FROM messages WHERE target_id = ? AND content LIKE ? ESCAPE '\\'";
+            const params: any[] = [userId, `%${safeSearch}%`];
             if (channelId) { sql += " AND channel_id = ?"; params.push(channelId); }
             if (guildId)   { sql += " AND guild_id = ?";   params.push(guildId); }
             if (since) {

@@ -1,5 +1,6 @@
 import { FastifyInstance } from "fastify";
 import { getDb } from "../../database/connection";
+import { escapeLikePattern } from "../../utils/like-escape";
 
 /** Parse a YYYY-MM-DD string to a UTC midnight timestamp. Returns NaN on bad input. */
 function parseDateParam(s: string): number {
@@ -55,8 +56,10 @@ export function registerTimelineRoutes(app: FastifyInstance): void {
         }
 
         if (search) {
-            sql += " AND (data LIKE ? OR event_type LIKE ?)";
-            params.push(`%${search}%`, `%${search}%`);
+            // Escape `%`/`_` to literals — see utils/like-escape.ts for context.
+            const safe = escapeLikePattern(search);
+            sql += " AND (data LIKE ? ESCAPE '\\' OR event_type LIKE ? ESCAPE '\\')";
+            params.push(`%${safe}%`, `%${safe}%`);
         }
 
         sql += " ORDER BY timestamp DESC LIMIT ? OFFSET ?";

@@ -30,7 +30,7 @@ import {
     startStatusPoller, stopStatusPoller, setRequestGuildMembersFn,
     setSelfbotGuildsFn, setSubscribePresenceFn,
 } from "./pollers/status-poller";
-import { startApiServer } from "./api/server";
+import { startApiServer, setGatewayHealthFn } from "./api/server";
 import { pushSSEEvent } from "./api/routes/events";
 import { setAlertCallback, reloadRules, evaluateEvent, resetAlertFireCounts } from "./alerts/engine";
 import { computeDailySummaries } from "./daily-summary";
@@ -718,6 +718,9 @@ async function main(): Promise<void> {
 
     gateway = new GatewayClient();
     setGatewayRef(gateway);
+    // /health reflects gateway connectivity. Capture via closure so a token
+    // rotation (which reassigns `gateway`) is picked up automatically.
+    setGatewayHealthFn(() => gateway?.isConnected() ?? false);
     setupGatewayHandlers(gateway);
     await gateway.connect();
 

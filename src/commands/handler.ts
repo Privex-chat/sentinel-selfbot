@@ -300,6 +300,13 @@ async function cmdLabel(channelId: string, args: string[]): Promise<void> {
     log.info(`Command: set label for ${userId}: "${label}"`);
 }
 
+// Cumulative cap on the per-target notes column. Notes are append-only;
+// without a cap the column grows unbounded and eventually shows up in every
+// `getAllTargets` response (which the dashboard hits on every refresh).
+// 4 000 chars ≈ 60 timestamped 50-char notes — enough for active investigation
+// without becoming a megabyte payload.
+const MAX_NOTES_LEN = 4000;
+
 async function cmdNote(channelId: string, args: string[]): Promise<void> {
     const userId = args[0] ? parseUserId(args[0]) : null;
     if (!userId || args.length < 2) {
@@ -319,9 +326,20 @@ async function cmdNote(channelId: string, args: string[]): Promise<void> {
     const timestamp = fmtDateTime(Date.now());
     const existing  = row.notes ?? "";
     const newNotes  = existing ? `${existing}\n[${timestamp}] ${noteText}` : `[${timestamp}] ${noteText}`;
+
+    if (newNotes.length > MAX_NOTES_LEN) {
+        await sendTempMessage(
+            channelId,
+            `❌ Notes for \`${userId}\` would exceed ${MAX_NOTES_LEN} chars (current: ${existing.length}). ` +
+            `Trim old entries via the API before adding more.`,
+            8_000
+        );
+        return;
+    }
+
     db.prepare("UPDATE targets SET notes = ? WHERE user_id = ?").run(newNotes, userId);
 
-    await sendTempMessage(channelId, `📝 Note appended to \`${userId}\`.`);
+    await sendTempMessage(channelId, `📝 Note appended to \`${userId}\`. (${newNotes.length}/${MAX_NOTES_LEN} chars used)`);
     log.info(`Command: appended note to ${userId}`);
 }
 

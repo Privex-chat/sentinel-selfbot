@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyRequest } from "fastify";
 import { getStmts } from "../../database/queries";
 import { getDb } from "../../database/connection";
+import { escapeLikePattern } from "../../utils/like-escape";
 
 // ── SSE replay buffer ────────────────────────────────────────────────────────
 //
@@ -80,8 +81,12 @@ export function registerEventRoutes(app: FastifyInstance): void {
         if (guildId)   { sql += " AND guild_id = ?";    params.push(guildId); }
         if (channelId) { sql += " AND channel_id = ?";  params.push(channelId); }
         if (search)    {
-            sql += " AND (data LIKE ? OR event_type LIKE ?)";
-            params.push(`%${search}%`, `%${search}%`);
+            // Escape so `%`/`_` from the client are treated as literals, not
+            // wildcards. Without this a single `%` triggers a full-table scan
+            // against the `data` JSON blob column.
+            const safe = escapeLikePattern(search);
+            sql += " AND (data LIKE ? ESCAPE '\\' OR event_type LIKE ? ESCAPE '\\')";
+            params.push(`%${safe}%`, `%${safe}%`);
         }
 
         sql += " ORDER BY timestamp DESC";
