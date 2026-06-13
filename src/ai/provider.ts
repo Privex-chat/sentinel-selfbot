@@ -163,12 +163,15 @@ export class AnthropicProvider implements AIProvider {
 // We enforce a minimum 4,500 ms gap between requests (~13 RPM) which gives a
 // comfortable buffer so bursts never trip the quota.
 //
-// This is a module-level singleton so it is shared across every call site
-// (social graph analyzer, categorizer, brief generator) regardless of which
-// code path invoked complete().
+// Concurrent callers (social graph + categorizer + brief generator can all fire
+// at the same daily tick) used to race the rate gate: each saw the same
+// `geminiLastRequestAt` value and both proceeded, blowing past the 15 RPM cap.
+// `geminiInflight` is a promise chain that serialises every Gemini complete()
+// call regardless of caller — only one runs at a time, queued in arrival order.
 
 const GEMINI_MIN_GAP_MS = 6_500;
 let geminiLastRequestAt = 0;
+let geminiInflight: Promise<unknown> = Promise.resolve();
 
 async function geminiRateWait(): Promise<void> {
     const wait = GEMINI_MIN_GAP_MS - (Date.now() - geminiLastRequestAt);
@@ -176,6 +179,23 @@ async function geminiRateWait(): Promise<void> {
         await new Promise<void>(resolve => setTimeout(resolve, wait));
     }
     geminiLastRequestAt = Date.now();
+}
+
+/**
+ * Serialise a Gemini API call against every other in-flight Gemini call. The
+ * returned promise resolves with `work`'s result; the chain swallows rejections
+ * internally so one failure doesn't poison subsequent callers.
+ */
+function geminiSerialize<T>(work: () => Promise<T>): Promise<T> {
+    // Wait for the previous call to settle (success OR failure), then run.
+    // The `catch(() => undefined)` strips the previous error so a single bad
+    // call doesn't reject everyone queued behind it.
+    const next = geminiInflight.catch(() => undefined).then(() => work());
+    // Replace the chain head with the new promise so the NEXT caller waits on
+    // us. Use catch() on the stored ref so an uncaught rejection inside `work`
+    // doesn't surface as an unhandledRejection on the chain itself.
+    geminiInflight = next.catch(() => undefined);
+    return next;
 }
 
 /**
@@ -219,7 +239,13 @@ export class GeminiProvider implements AIProvider {
 
     isAvailable() { return true; }
 
-    async complete(systemPrompt: string, userPrompt: string, maxTokens = 512): Promise<string> {
+    complete(systemPrompt: string, userPrompt: string, maxTokens = 512): Promise<string> {
+        // Serialise all Gemini calls through the module-level chain so concurrent
+        // callers can't race the rate gate and burst above 15 RPM.
+        return geminiSerialize(() => this.completeInner(systemPrompt, userPrompt, maxTokens));
+    }
+
+    private async completeInner(systemPrompt: string, userPrompt: string, maxTokens: number): Promise<string> {
         const model = config.aiModel || "gemini-2.0-flash";
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.aiApiKey}`;
 

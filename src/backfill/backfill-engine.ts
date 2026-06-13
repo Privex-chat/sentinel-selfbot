@@ -36,8 +36,20 @@ const activeBackfills = new Set<string>();
 const backfillQueue: string[] = [];
 let queueDraining = false;
 
-// Paused flag per target
+// Paused flag per target — resumable; "paused" status is written to the DB so
+// the operator can resume later via $resume.
 const pausedTargets = new Set<string>();
+
+// Cancellation flag per target — non-resumable, intended for "target was
+// removed" / "target was wiped before the backfill finished". When set, every
+// loop checkpoint short-circuits without writing a "paused" status row (the
+// target row is about to be FK-cascade-deleted anyway). Cleared at the end of
+// each runBackfillForTarget so re-adding the same userId later works cleanly.
+const cancelledTargets = new Set<string>();
+
+function isCancelled(targetId: string): boolean {
+    return cancelledTargets.has(targetId);
+}
 
 // ── Queue management ──────────────────────────────────────────────────────────
 
@@ -62,6 +74,9 @@ async function drainQueue(): Promise<void> {
             log.error(`Backfill error for ${targetId}: ${err.message}`);
         } finally {
             activeBackfills.delete(targetId);
+            // Clear cancellation flag so a re-added target with the same userId
+            // doesn't inherit a phantom "cancelled" state from the previous run.
+            cancelledTargets.delete(targetId);
         }
 
         // Brief pause between targets so there's no immediate burst when the
@@ -157,6 +172,13 @@ async function processChannel(
 
     try {
         while (true) {
+            // Cancellation is fatal — bail without touching the progress row.
+            // FK cascade on target delete will clean the row up anyway and there
+            // is no resume path for a cancelled target.
+            if (isCancelled(targetId)) {
+                log.info(`Backfill cancelled for ${targetId} — abandoning channel ${channelId}`);
+                return;
+            }
             if (pausedTargets.has(targetId)) {
                 log.info(`Backfill paused for ${targetId}`);
                 stmts.updateBackfillProgress.run(
@@ -269,11 +291,11 @@ async function processGuild(targetId: string, guildId: string): Promise<void> {
         // Concurrent channel reads are the pattern that looks most like a
         // scraper — sequential reads with pauses look like a human scrolling.
         for (let i = 0; i < textChannels.length; i++) {
-            if (pausedTargets.has(targetId)) break;
+            if (isCancelled(targetId) || pausedTargets.has(targetId)) break;
             await processChannel(targetId, textChannels[i].id, guildId);
 
             // Pause between channels (skip after the last one)
-            if (i < textChannels.length - 1 && !pausedTargets.has(targetId)) {
+            if (i < textChannels.length - 1 && !isCancelled(targetId) && !pausedTargets.has(targetId)) {
                 await jitterSleep(INTER_CHANNEL_DELAY_MS, 30);
             }
         }
@@ -327,17 +349,21 @@ async function runBackfillForTarget(targetId: string): Promise<void> {
     // Process guilds one at a time. Concurrent guild reads multiply the request
     // rate and are a reliable trigger for Discord's automation detection.
     for (let i = 0; i < guildIds.length; i++) {
-        if (pausedTargets.has(targetId)) break;
+        if (isCancelled(targetId) || pausedTargets.has(targetId)) break;
         await processGuild(targetId, guildIds[i]);
 
         // Pause between guilds (skip after the last one)
-        if (i < guildIds.length - 1 && !pausedTargets.has(targetId)) {
+        if (i < guildIds.length - 1 && !isCancelled(targetId) && !pausedTargets.has(targetId)) {
             log.debug(`Waiting ${INTER_GUILD_DELAY_MS}ms before next guild for ${targetId}`);
             await jitterSleep(INTER_GUILD_DELAY_MS, 30);
         }
     }
 
-    log.info(`Backfill complete for ${targetId}`);
+    if (isCancelled(targetId)) {
+        log.info(`Backfill exited for ${targetId} — cancelled mid-run`);
+    } else {
+        log.info(`Backfill complete for ${targetId}`);
+    }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -437,10 +463,10 @@ export async function customBackfillForTarget(
             log.info(`new_channels: ${newGuildIds.length} new guild(s) for ${targetId}: ${newGuildIds.join(", ")}`);
 
             for (let i = 0; i < newGuildIds.length; i++) {
-                if (pausedTargets.has(targetId)) break;
+                if (isCancelled(targetId) || pausedTargets.has(targetId)) break;
                 await processGuild(targetId, newGuildIds[i]);
 
-                if (i < newGuildIds.length - 1 && !pausedTargets.has(targetId)) {
+                if (i < newGuildIds.length - 1 && !isCancelled(targetId) && !pausedTargets.has(targetId)) {
                     await jitterSleep(INTER_GUILD_DELAY_MS, 30);
                 }
             }
@@ -450,10 +476,10 @@ export async function customBackfillForTarget(
 
         // full_reset path: process every guild sequentially.
         for (let i = 0; i < allGuildIds.length; i++) {
-            if (pausedTargets.has(targetId)) break;
+            if (isCancelled(targetId) || pausedTargets.has(targetId)) break;
             await processGuild(targetId, allGuildIds[i]);
 
-            if (i < allGuildIds.length - 1 && !pausedTargets.has(targetId)) {
+            if (i < allGuildIds.length - 1 && !isCancelled(targetId) && !pausedTargets.has(targetId)) {
                 log.debug(`full_reset: waiting ${INTER_GUILD_DELAY_MS}ms before next guild for ${targetId}`);
                 await jitterSleep(INTER_GUILD_DELAY_MS, 30);
             }
@@ -466,6 +492,7 @@ export async function customBackfillForTarget(
         throw err;
     } finally {
         activeBackfills.delete(targetId);
+        cancelledTargets.delete(targetId);
     }
 }
 
@@ -508,4 +535,34 @@ export function pauseBackfill(targetId: string): void {
 export function resumeBackfill(targetId: string): void {
     pausedTargets.delete(targetId);
     log.info(`Backfill resumed for ${targetId}`);
+}
+
+/**
+ * Hard-cancel any backfill for this target.
+ *
+ * Distinct from pause: the in-flight loop short-circuits at the next checkpoint
+ * WITHOUT writing a "paused" status row (target row is about to be deleted) and
+ * the queue entry is removed so a queued-but-not-yet-running backfill never
+ * starts. Safe to call when no backfill is active — flag is no-op'd at the next
+ * runBackfillForTarget cleanup.
+ *
+ * Called by target-lifecycle.onTargetRemoved so deleting a target while its
+ * backfill is mid-channel doesn't cause minutes of FK-failing inserts against
+ * the cascaded-deleted target_id.
+ */
+export function cancelBackfill(targetId: string): void {
+    cancelledTargets.add(targetId);
+    // Also set paused so any check that only inspects pausedTargets (e.g. the
+    // legacy checks remaining inside this module) still short-circuits.
+    pausedTargets.add(targetId);
+
+    const queueIdx = backfillQueue.indexOf(targetId);
+    if (queueIdx >= 0) {
+        backfillQueue.splice(queueIdx, 1);
+        log.info(`Backfill cancelled for ${targetId} (removed from queue)`);
+    } else if (activeBackfills.has(targetId)) {
+        log.info(`Backfill cancelled for ${targetId} (in-flight — will exit at next checkpoint)`);
+    } else {
+        log.debug(`Backfill cancel requested for ${targetId} but no run was active`);
+    }
 }

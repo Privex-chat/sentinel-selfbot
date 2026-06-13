@@ -194,6 +194,79 @@ export function removeTargetState(targetId: string): void {
     coParticipantCache.delete(targetId);
 }
 
+/**
+ * Force-close any open voice session for a target.
+ *
+ * Used by the presence collector when a target transitions to offline (Discord
+ * disconnects offline users from voice, but a VOICE_STATE_UPDATE with null
+ * channel_id isn't always delivered during a gateway disconnect), and by the
+ * RESUMED handler to clean up sessions whose closing events were missed.
+ *
+ * No-op when no open session exists. Clears the in-memory state map alongside
+ * the DB row so subsequent VOICE_STATE_UPDATEs see a clean slate.
+ */
+export function closeOpenVoiceForTarget(targetId: string, reason: string): void {
+    const state = currentVoiceState.get(targetId);
+    const stmts = getStmts();
+    const now = Date.now();
+
+    // Always run the DB-side close even if our in-memory state is empty — there
+    // may be a row left over from before a restart that the in-memory map never
+    // tracked. Returns the row count so we can decide whether to emit an event.
+    const result = stmts.closeOpenVoiceSessionsForTarget.run(now, now, targetId);
+
+    if (result.changes > 0) {
+        // Emit a synthetic VOICE_LEAVE event so analytics + alerts see the close.
+        const guildId = state?.guildId ?? null;
+        const channelId = state?.channelId ?? null;
+        const leaveData = JSON.stringify({ guildId, channelId, reason });
+        stmts.insertEvent.run(targetId, "VOICE_LEAVE", now, leaveData, guildId, channelId);
+        log.info(`${targetId}: force-closed ${result.changes} open voice session(s) — ${reason}`);
+    }
+
+    currentVoiceState.delete(targetId);
+    coParticipantCache.delete(targetId);
+}
+
+/**
+ * On RESUMED, scan every open voice_session and close any whose target is
+ * cached as offline. The Discord client never sees those mid-session leaves
+ * because the gateway was disconnected when they happened; without this,
+ * sessions can stay "open" indefinitely until the next manual VOICE_STATE_UPDATE
+ * (which may never come if the user stays offline).
+ *
+ * Targets we cached as online/idle/dnd are left alone — they're likely still in
+ * voice and we'd lose minutes of valid co-presence time by closing them.
+ *
+ * Takes a `getPresence` callback rather than importing presence directly so
+ * voice → presence stays a one-way dep (presence is already the importer).
+ */
+export function reconcileOpenVoiceSessions(
+    getPresence: (targetId: string) => { status: string } | undefined
+): void {
+    const stmts = getStmts();
+    const rows = stmts.getAllOpenVoiceSessions.all() as Array<{ target_id: string }>;
+
+    const offlineTargets = new Set<string>();
+    for (const row of rows) {
+        const presence = getPresence(row.target_id);
+        // Treat "missing presence cache entry" as offline too — if we don't even
+        // have a presence record, the target very likely isn't in voice either.
+        if (!presence || presence.status === "offline") {
+            offlineTargets.add(row.target_id);
+        }
+    }
+
+    for (const targetId of offlineTargets) {
+        try { closeOpenVoiceForTarget(targetId, "RESUMED reconcile (cached offline)"); }
+        catch (err: any) { log.warn(`voice RESUMED close failed for ${targetId}: ${err.message}`); }
+    }
+
+    if (offlineTargets.size > 0) {
+        log.info(`Voice reconcile: closed ${offlineTargets.size} stale session(s) after RESUMED`);
+    }
+}
+
 export function updateCoParticipants(targetId: string, participants: string[]): void {
     const existing = coParticipantCache.get(targetId) || new Set();
     for (const p of participants) {

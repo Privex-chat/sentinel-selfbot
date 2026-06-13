@@ -15,9 +15,10 @@ import {
 import {
     handleMessageCreate, handleMessageUpdate, handleMessageDelete,
 } from "./collectors/message";
-import { handleTypingStart } from "./collectors/typing";
+import { handleTypingStart, cancelAllPendingTyping } from "./collectors/typing";
 import {
     handleVoiceStateUpdate, updateCoParticipants, getCurrentVoiceState,
+    reconcileOpenVoiceSessions,
 } from "./collectors/voice";
 import { handleProfileUpdate } from "./collectors/profile";
 import { handleReactionAdd, handleReactionRemove } from "./collectors/reaction";
@@ -78,6 +79,55 @@ function startHeartbeatLogger(): void {
         } catch { /* non-fatal */ }
     }, INTERVAL);
     log.info("Heartbeat logger started (60 s interval)");
+}
+
+/**
+ * Sweep any session that's been left open longer than 48 h and cap its end_time
+ * at start_time + 48 h. Runs periodically (alongside daily summaries) so
+ * abandoned sessions don't accumulate between restarts.
+ *
+ * 48 h is wide enough that any plausible real human session — even an
+ * always-online phone presence — stays untouched. Anything that crosses it is
+ * almost always the result of a missed close event (gateway disconnect, voice
+ * subsystem race) rather than a real continuous presence.
+ *
+ * Uses a fixed cap (not "now") so the bounded session doesn't grow each tick.
+ */
+function closeAbandonedOpenSessions(): void {
+    const db = getDb();
+    const ABANDON_AGE_MS = 48 * 60 * 60 * 1000;
+    const cutoff = Date.now() - ABANDON_AGE_MS;
+
+    // For each table, set end_time = start_time + ABANDON_AGE_MS (so duration is
+    // bounded), guarded by start_time < cutoff so only old open sessions match.
+    const presence = db
+        .prepare(
+            "UPDATE presence_sessions  SET end_time = start_time + ?, duration_ms = ? " +
+            "WHERE end_time IS NULL AND start_time < ?"
+        )
+        .run(ABANDON_AGE_MS, ABANDON_AGE_MS, cutoff).changes;
+
+    const activity = db
+        .prepare(
+            "UPDATE activity_sessions  SET end_time = start_time + ?, duration_ms = ? " +
+            "WHERE end_time IS NULL AND start_time < ?"
+        )
+        .run(ABANDON_AGE_MS, ABANDON_AGE_MS, cutoff).changes;
+
+    const voice = db
+        .prepare(
+            "UPDATE voice_sessions     SET end_time = start_time + ?, duration_ms = ? " +
+            "WHERE end_time IS NULL AND start_time < ?"
+        )
+        .run(ABANDON_AGE_MS, ABANDON_AGE_MS, cutoff).changes;
+
+    if (presence + activity + voice > 0) {
+        log.warn(
+            `Abandoned-session sweep capped ${presence} presence, ${activity} activity, ` +
+            `${voice} voice session(s) at ${ABANDON_AGE_MS / 3_600_000} h. ` +
+            `Most likely cause: missed close events during a gateway disconnect.`
+        );
+    }
 }
 
 function closeStaleOpenSessions(): void {
@@ -471,12 +521,27 @@ function setupGatewayHandlers(client: GatewayClient): void {
                         requestInitialPresences(client);
                         subscribeGuildPresences(client);
                     }, 3_000);
+                    // Voice sessions whose targets are cached as offline get
+                    // closed: Discord disconnects offline users from voice but
+                    // we never saw the VOICE_STATE_UPDATE during the disconnect.
+                    // Done immediately (not behind the 3s timeout) since it's
+                    // a pure DB+cache operation and doesn't touch Discord.
+                    try { reconcileOpenVoiceSessions(getCurrentPresence); }
+                    catch (err: any) { log.warn(`Voice reconcile on RESUMED failed: ${err.message}`); }
                     break;
                 }
             }
         } catch (err: any) {
             log.error(`Error handling ${eventName}: ${err.message}`);
         }
+    });
+
+    // When the gateway socket closes (reconnect, transient network, server
+    // requested) the in-memory pending-typing timers should be cleared so they
+    // don't fire ghost-type events for messages we never had a chance to see.
+    client.on("close", () => {
+        try { cancelAllPendingTyping(); }
+        catch (err: any) { log.warn(`cancelAllPendingTyping on close: ${err.message}`); }
     });
 
     client.on("ready", (data: any) => {
@@ -690,6 +755,8 @@ async function main(): Promise<void> {
         catch (err: any) { log.error(`Baseline computation error: ${err.message}`); }
         try { resetAlertFireCounts(); }
         catch (err: any) { log.error(`Alert fire count reset error: ${err.message}`); }
+        try { closeAbandonedOpenSessions(); }
+        catch (err: any) { log.error(`Abandoned-session sweep error: ${err.message}`); }
     }, withJitter(config.dailySummaryIntervalMs));
 
     setTimeout(() => {

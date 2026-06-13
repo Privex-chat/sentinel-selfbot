@@ -2,6 +2,7 @@ import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
 import { evaluateEvent } from "../alerts/engine";
 import { pushSSEEvent } from "../api/routes/events";
+import { closeOpenVoiceForTarget } from "./voice";
 
 const log = createLogger("Presence");
 
@@ -94,6 +95,16 @@ export function handlePresenceUpdate(targetId: string, data: any): void {
     }
 
     currentPresence.set(targetId, { status: newStatus, platform, clientStatus });
+
+    // Discord force-disconnects offline users from voice, but a VOICE_STATE_UPDATE
+    // with null channel_id isn't always delivered during a gateway disconnect.
+    // Whenever a target transitions to offline, defensively close any open voice
+    // session for them. No-op when there's nothing open. Without this, voice
+    // sessions could appear to last for days across reconnects.
+    if (newStatus === "offline" && oldStatus !== "offline") {
+        try { closeOpenVoiceForTarget(targetId, "presence→offline"); }
+        catch (err: any) { log.warn(`voice close on offline failed for ${targetId}: ${err.message}`); }
+    }
 }
 
 /** Drop the in-memory presence state for a target. Called when a target is deleted. */

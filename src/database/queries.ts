@@ -113,6 +113,18 @@ function prepareStatements() {
         getOpenVoiceSession: db.prepare(
             "SELECT * FROM voice_sessions WHERE target_id = ? AND end_time IS NULL ORDER BY start_time DESC LIMIT 1"
         ),
+        // All open voice sessions across every target. Used by the RESUMED
+        // reconciler to find sessions that may have ended during a disconnect.
+        getAllOpenVoiceSessions: db.prepare(
+            "SELECT * FROM voice_sessions WHERE end_time IS NULL"
+        ),
+        // Single-statement close-by-id used by the offline-transition voice
+        // reconciler in collectors/presence.ts. Same shape as closeVoiceSession
+        // but writes NULL co_participants since at offline-time we don't have
+        // a fresh participant snapshot.
+        closeOpenVoiceSessionsForTarget: db.prepare(
+            "UPDATE voice_sessions SET end_time = ?, duration_ms = ? - start_time WHERE target_id = ? AND end_time IS NULL"
+        ),
         updateVoiceSessionState: db.prepare(
             "UPDATE voice_sessions SET self_mute = ?, self_deaf = ?, server_mute = ?, server_deaf = ?, streaming = ? WHERE id = ?"
         ),

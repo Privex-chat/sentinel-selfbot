@@ -25,6 +25,7 @@ import { removeTargetState as removeFromMutualServers } from "./pollers/mutual-s
 import { removeTargetState as removeFromConnectedAccounts } from "./pollers/connected-accounts";
 import { removeTargetState as removeFromAlertEngine } from "./alerts/engine";
 import { invalidateSocialGraphCache } from "./analyzers/social-graph";
+import { cancelBackfill } from "./backfill/backfill-engine";
 
 const log = createLogger("TargetLifecycle");
 
@@ -88,6 +89,11 @@ export function getTargetTimezone(targetId: string): string {
 // ── Lifecycle cleanup ────────────────────────────────────────────────────────
 
 export function onTargetRemoved(userId: string): void {
+    // Cancel backfill FIRST so the in-flight loop sees the flag before the
+    // collectors lose their state. If we cleared collectors first, the next
+    // backfill page would call handleMessageCreate, the FK-cascade would have
+    // already nuked the targets row, and the insert would silently fail.
+    try { cancelBackfill(userId); }              catch (err: any) { log.warn(`backfill cancel: ${err.message}`); }
     try { removeFromPresence(userId); }          catch (err: any) { log.warn(`presence cleanup: ${err.message}`); }
     try { removeFromActivity(userId); }          catch (err: any) { log.warn(`activity cleanup: ${err.message}`); }
     try { removeFromVoice(userId); }             catch (err: any) { log.warn(`voice cleanup: ${err.message}`); }

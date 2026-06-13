@@ -28,6 +28,11 @@ export function initDatabase(): Database.Database {
     db.pragma("synchronous = NORMAL");
     db.pragma("foreign_keys = ON");
     db.pragma("cache_size = -64000"); // 64MB cache
+    // Wait up to 5 s for the file lock instead of failing immediately with
+    // SQLITE_BUSY. better-sqlite3 is single-writer in-process, but if another
+    // process (web UI, CLI inspector, backup tool) holds the file lock the
+    // default zero-timeout surfaces an opaque error rather than waiting.
+    db.pragma("busy_timeout = 5000");
 
     log.info("Database initialized with WAL mode");
     return db;

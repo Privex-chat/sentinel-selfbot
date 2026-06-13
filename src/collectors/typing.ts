@@ -33,6 +33,29 @@ function typingKey(userId: string, channelId: string): string {
     return `${userId}:${channelId}`;
 }
 
+/**
+ * Cancel every armed ghost-typing timer.
+ *
+ * Called from the gateway "close" listener so that pending GHOST_TYPE events
+ * don't fire while the connection is down. Without this, a 15s timeout armed
+ * just before a disconnect would still trip its setTimeout while we're
+ * offline, recording a "ghost type" that may not have actually happened (the
+ * user may have sent the message but we never saw the MESSAGE_CREATE).
+ *
+ * Does NOT clear the cooldown map — those are TTL'd separately and re-arming
+ * them on reconnect is correct.
+ */
+export function cancelAllPendingTyping(): void {
+    if (pendingTyping.size === 0) return;
+    let cleared = 0;
+    for (const pending of pendingTyping.values()) {
+        clearTimeout(pending.timeout);
+        cleared++;
+    }
+    pendingTyping.clear();
+    log.debug(`Cleared ${cleared} pending ghost-type timer(s) on gateway disconnect`);
+}
+
 /** Drop every pending-typing timeout and cooldown entry for this target. */
 export function removeTargetState(targetId: string): void {
     const prefix = `${targetId}:`;
