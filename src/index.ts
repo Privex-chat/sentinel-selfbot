@@ -46,6 +46,7 @@ import { notifyStartup, notifyCriticalError } from "./utils/webhook-notifier";
 import { loadRuntimeConfig, onConfigChange } from "./runtime-config";
 import { resetAIProvider } from "./ai/provider";
 import { isTargetCached, refreshTargetCache } from "./target-lifecycle";
+import { hasDataKey } from "./utils/crypto";
 
 const log = createLogger("Sentinel");
 
@@ -592,6 +593,20 @@ async function main(): Promise<void> {
     } catch (err: any) {
         log.error(err.message);
         process.exit(1);
+    }
+
+    // Loud warning: in cloud / local+cloud mode, any sensitive runtime_config
+    // values (Discord token, AI key, Supabase service key, webhook URLs) end
+    // up in Supabase. Without SENTINEL_DATA_KEY they go in plaintext.
+    if (
+        (config.dbMode === "cloud" || config.dbMode === "local+cloud") &&
+        !hasDataKey()
+    ) {
+        log.warn(
+            "DB_MODE=" + config.dbMode + " is configured but SENTINEL_DATA_KEY is not set. " +
+            "Sensitive runtime_config values will be stored as PLAINTEXT in both SQLite and Supabase. " +
+            "Generate a key with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\""
+        );
     }
 
     if (config.dbMode === "cloud") {

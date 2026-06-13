@@ -1,6 +1,7 @@
 import { getDb } from "./database/connection";
 import { config } from "./utils/config";
 import { createLogger } from "./utils/logger";
+import { encryptSensitive, decryptValue } from "./utils/crypto";
 
 const log = createLogger("RuntimeConfig");
 
@@ -145,11 +146,27 @@ export function loadRuntimeConfig(): void {
 
     let applied = 0;
     for (const { key, value } of rows) {
-        if ((RUNTIME_KEYS as readonly string[]).includes(key)) {
-            applyToConfig(key as RuntimeKey, value);
-            applied++;
-            log.debug(`Loaded: ${key}${SENSITIVE_KEYS.has(key) ? " [sensitive]" : ` = ${value}`}`);
+        if (!(RUNTIME_KEYS as readonly string[]).includes(key)) continue;
+
+        // Values written by setRuntimeConfig for sensitive keys carry the
+        // `enc:v1:` envelope. Legacy plaintext rows pass through unchanged.
+        // Failed decryption (e.g. SENTINEL_DATA_KEY rotated without re-write)
+        // is logged and the key is skipped so the bot still boots with .env
+        // fallbacks instead of crashing the runtime config load.
+        let plaintext: string;
+        try {
+            plaintext = decryptValue(value);
+        } catch (err: any) {
+            log.error(
+                `Skipping runtime_config "${key}" — decrypt failed: ${err.message}. ` +
+                `Falling back to .env value (if any).`
+            );
+            continue;
         }
+
+        applyToConfig(key as RuntimeKey, plaintext);
+        applied++;
+        log.debug(`Loaded: ${key}${SENSITIVE_KEYS.has(key) ? " [sensitive]" : ` = ${plaintext}`}`);
     }
 
     log.info(`Runtime config loaded (${applied} override(s) from DB)`);
@@ -172,11 +189,17 @@ export function setRuntimeConfig(key: RuntimeKey, value: string): void {
         throw new Error(validationError);
     }
 
+    // Encrypt sensitive values before persisting. The in-memory config object
+    // and onChange listeners still see plaintext — encryption is purely an
+    // at-rest concern. When SENTINEL_DATA_KEY is absent, encryptSensitive is a
+    // no-op (with a one-time warn) so this path stays backward-compatible.
+    const stored = SENSITIVE_KEYS.has(key) ? encryptSensitive(value) : value;
+
     const db = getDb();
     db.prepare(
         `INSERT INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-    ).run(key, value, Date.now());
+    ).run(key, stored, Date.now());
 
     applyToConfig(key, value);
     log.info(`Config updated: ${key}${SENSITIVE_KEYS.has(key) ? " [sensitive]" : ` = ${value}`}`);

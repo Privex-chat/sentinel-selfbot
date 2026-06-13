@@ -111,6 +111,10 @@ const TABLES: Array<{ name: string; orderCol: string }> = [
     { name: "daily_summaries",       orderCol: "id" },
     { name: "relationship_analysis", orderCol: "id" },
     { name: "relationship_history",  orderCol: "id" },
+    // runtime_config last so any FK-bearing tables loaded above don't depend
+    // on it. Sensitive values arrive in the `enc:v1:` envelope and are
+    // decrypted lazily by runtime-config.ts:loadRuntimeConfig at startup.
+    { name: "runtime_config",        orderCol: "key" },
 ];
 
 // ─── Public entry point ───────────────────────────────────────────────────────

@@ -236,6 +236,7 @@ export class SupabaseSyncEngine {
             await this.syncBehavioralBaselines(db);
             await this.syncTargetConfig(db);
             await this.syncMessageCategories(db, windowStart);
+            await this.syncRuntimeConfig(db);
 
             log.info(`Supabase sync cycle completed in ${Date.now() - started}ms`);
         } catch (err: any) {
@@ -605,6 +606,24 @@ export class SupabaseSyncEngine {
         const maxAt = Math.max(...rows.map(r => r.updated_at as number));
         setSyncState(db, "target_config", 0, maxAt);
         log.debug(`target_config: synced ${rows.length} row(s) (lastAt → ${maxAt})`);
+    }
+
+    private async syncRuntimeConfig(db: Database.Database): Promise<void> {
+        // Watermarked by updated_at so changes propagate within one sync cycle
+        // without re-pushing every key on every tick. Sensitive values are
+        // already encrypted at rest (runtime-config.ts:setRuntimeConfig);
+        // this method ships the envelope as-is without ever seeing plaintext.
+        const { lastAt } = getSyncState(db, "runtime_config");
+        const rows = db
+            .prepare(
+                "SELECT key, value, updated_at FROM runtime_config WHERE updated_at > ? ORDER BY updated_at LIMIT ?"
+            )
+            .all(lastAt, BATCH_SIZE * 5) as any[];
+        if (!rows.length) return;
+        await upsertBatched(this.supabase, "runtime_config", rows, "key");
+        const maxAt = Math.max(...rows.map(r => r.updated_at as number));
+        setSyncState(db, "runtime_config", 0, maxAt);
+        log.debug(`runtime_config: synced ${rows.length} row(s) (lastAt → ${maxAt})`);
     }
 
     private async syncMessageCategories(
