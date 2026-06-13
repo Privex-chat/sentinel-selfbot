@@ -732,11 +732,26 @@ ALTER TABLE public.message_categories DISABLE ROW LEVEL SECURITY;
 -- =============================================================================
 -- SCHEMA v3 ADDITIONS
 -- =============================================================================
+--
+-- The `messages.source` column AND its CHECK are already present in the base
+-- CREATE TABLE above. This block exists only for databases that were created
+-- against a pre-v3 schema dump. It is a no-op on any install where the base
+-- table has been (re-)created from this file.
 
 -- ── messages — source column (distinguishes live gateway vs backfilled history) ─
 
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='messages' AND column_name='source') THEN
         ALTER TABLE public.messages ADD COLUMN source TEXT NOT NULL DEFAULT 'live';
+    END IF;
+    -- Add the CHECK separately so an upgrade from pre-v3 also gets it. (The
+    -- base CREATE TABLE above attaches the constraint inline; this block
+    -- ensures parity for installs that ran the ALTER above on an older base.)
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.check_constraints
+        WHERE constraint_name = 'messages_source_valid'
+    ) THEN
+        ALTER TABLE public.messages
+            ADD CONSTRAINT messages_source_valid CHECK (source IN ('live', 'backfilled'));
     END IF;
 END $$;

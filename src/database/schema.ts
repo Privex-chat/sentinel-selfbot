@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export const CREATE_TABLES_SQL = `
 -- Core tables
@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS presence_sessions (
     FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_presence_target ON presence_sessions(target_id, start_time);
+-- Hot-path partial index: every PRESENCE_UPDATE closes open sessions and
+-- every shutdown sweeps them. WHERE end_time IS NULL keeps the index tiny.
+CREATE INDEX IF NOT EXISTS idx_presence_open
+    ON presence_sessions(target_id) WHERE end_time IS NULL;
 
 CREATE TABLE IF NOT EXISTS activity_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,6 +77,12 @@ CREATE TABLE IF NOT EXISTS activity_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_activity_target ON activity_sessions(target_id, start_time);
 CREATE INDEX IF NOT EXISTS idx_activity_name ON activity_sessions(activity_name, start_time);
+-- Hot-path: handleActivityUpdate close-loop and NEW_GAME alert check.
+CREATE INDEX IF NOT EXISTS idx_activity_open
+    ON activity_sessions(target_id) WHERE end_time IS NULL;
+-- Supports getActivitySessions per-type queries (gaming analytics, NEW_GAME).
+CREATE INDEX IF NOT EXISTS idx_activity_type
+    ON activity_sessions(target_id, activity_type, start_time);
 
 CREATE TABLE IF NOT EXISTS voice_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,6 +102,12 @@ CREATE TABLE IF NOT EXISTS voice_sessions (
     FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_voice_target ON voice_sessions(target_id, start_time);
+-- Hot-path: getOpenVoiceSession / closeStaleOpenSessions.
+CREATE INDEX IF NOT EXISTS idx_voice_open
+    ON voice_sessions(target_id) WHERE end_time IS NULL;
+-- Supports timeline-range and per-guild voice queries.
+CREATE INDEX IF NOT EXISTS idx_voice_guild
+    ON voice_sessions(guild_id, channel_id, start_time);
 
 CREATE TABLE IF NOT EXISTS messages (
     message_id TEXT PRIMARY KEY,
@@ -119,6 +135,12 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_target ON messages(target_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, created_at);
+-- Partial indexes: getDeletedMessages and getEditedMessages each filter + sort
+-- on these columns. The partial WHERE clause keeps the index tiny in steady state.
+CREATE INDEX IF NOT EXISTS idx_messages_deleted
+    ON messages(target_id, deleted_at) WHERE deleted_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_edited
+    ON messages(target_id, edited_at) WHERE edited_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS typing_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,6 +153,9 @@ CREATE TABLE IF NOT EXISTS typing_events (
     FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_typing_target ON typing_events(target_id, timestamp);
+-- Ghost-typing analytics filter; partial keeps it cheap to maintain.
+CREATE INDEX IF NOT EXISTS idx_typing_ghosts
+    ON typing_events(target_id) WHERE resulted_in_message = 0;
 
 CREATE TABLE IF NOT EXISTS reactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,6 +172,8 @@ CREATE TABLE IF NOT EXISTS reactions (
     FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_reactions_target ON reactions(target_id, added_at);
+-- Per-message reaction lookups (e.g. "who reacted to this msg").
+CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
 
 CREATE TABLE IF NOT EXISTS guild_member_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,9 +185,17 @@ CREATE TABLE IF NOT EXISTS guild_member_events (
     new_value TEXT,
     FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_guild_member_target
+    ON guild_member_events(target_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_guild_member_guild
+    ON guild_member_events(guild_id, timestamp);
 
--- alert_rules includes all v2 columns in the base definition.
--- Migration v2 handles ALTER TABLE for databases that pre-date v2 (try/catch).
+-- alert_rules includes all v2 columns in the base definition and the
+-- target FK introduced in v6. target_id IS NULL means a global rule;
+-- ON DELETE CASCADE removes per-target rules when the target is deleted
+-- (previously these were silently orphaned).
+-- Migration v2 handles ALTER TABLE for column adds on pre-v2 databases;
+-- migration v6 handles the FK swap for pre-v6 databases.
 CREATE TABLE IF NOT EXISTS alert_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     target_id TEXT,
@@ -173,8 +208,13 @@ CREATE TABLE IF NOT EXISTS alert_rules (
     auto_suppressed INTEGER NOT NULL DEFAULT 0,
     fatigue_threshold INTEGER NOT NULL DEFAULT 20,
     composite_condition TEXT,
-    digest_mode INTEGER NOT NULL DEFAULT 0
+    digest_mode INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE ON UPDATE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_alert_rules_target
+    ON alert_rules(target_id) WHERE target_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled
+    ON alert_rules(enabled, rule_type);
 
 -- alert_history uses ON DELETE SET NULL so deleting an alert rule never
 -- blocks on referencing history rows (matches Supabase FK behaviour).
@@ -192,6 +232,9 @@ CREATE TABLE IF NOT EXISTS alert_history (
 );
 CREATE INDEX IF NOT EXISTS idx_alert_history_target ON alert_history(target_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_alert_history_rule ON alert_history(rule_id);
+-- Unacked alerts dashboard view; partial keeps it tiny.
+CREATE INDEX IF NOT EXISTS idx_alert_history_unacked
+    ON alert_history(target_id, acknowledged) WHERE acknowledged = 0;
 
 CREATE TABLE IF NOT EXISTS daily_summaries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

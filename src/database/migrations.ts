@@ -9,13 +9,16 @@ export function runMigrations(): void {
 
     db.exec(CREATE_TABLES_SQL);
 
+    // Detect fresh install: schema_version table will have been created by
+    // CREATE_TABLES_SQL but it's empty when this is a brand-new database.
     const versionRow = db.prepare("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1").get() as { version: number } | undefined;
     const currentVersion = versionRow?.version ?? 0;
 
     if (currentVersion === 0) {
-        for (let v = 1; v <= SCHEMA_VERSION; v++) {
-            applyMigration(v);
-        }
+        // Fresh install — CREATE_TABLES_SQL already created every table at the
+        // current schema shape, so we DON'T re-run historical migrations (which
+        // would needlessly recreate tables that were just created correctly).
+        // Just record the current version so subsequent boots are no-ops.
         db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(SCHEMA_VERSION);
         log.info(`Database initialized at schema version ${SCHEMA_VERSION}`);
     } else if (currentVersion < SCHEMA_VERSION) {
@@ -74,8 +77,11 @@ function applyMigration(version: number): void {
             db.pragma("foreign_keys = OFF");
             try {
                 const migrate = db.transaction(() => {
+                    // DROP first in case a previous failed run left a partial
+                    // alert_history_new behind (would otherwise collide on insert).
                     db.exec(`
-                        CREATE TABLE IF NOT EXISTS alert_history_new (
+                        DROP TABLE IF EXISTS alert_history_new;
+                        CREATE TABLE alert_history_new (
                             id           INTEGER PRIMARY KEY AUTOINCREMENT,
                             rule_id      INTEGER,
                             target_id    TEXT    NOT NULL,
@@ -126,6 +132,75 @@ function applyMigration(version: number): void {
                 `);
             } catch { /* table may already exist */ }
             log.info("Migration v5: runtime_config table created");
+            break;
+        }
+
+        case 6: {
+            // Recreate alert_rules with a FK to targets so deleting a target
+            // cascades to per-target rules (previously orphaned them) and
+            // matches the Supabase schema. Same pattern as v4 alert_history:
+            // FK pragma off, table-swap inside a transaction, FK pragma on.
+            //
+            // Orphaned rules (target_id points at a no-longer-existing target)
+            // are deleted BEFORE the swap so the new FK is consistent. The
+            // alternative — NULL-ing target_id — would silently convert
+            // per-target rules into global rules, which is the wrong default.
+            const db = getDb();
+            db.pragma("foreign_keys = OFF");
+            try {
+                const migrate = db.transaction(() => {
+                    // 1. Drop orphans (their target was previously deleted).
+                    const orphanCount = db.prepare(
+                        `DELETE FROM alert_rules
+                         WHERE target_id IS NOT NULL
+                           AND target_id NOT IN (SELECT user_id FROM targets)`
+                    ).run().changes;
+                    if (orphanCount > 0) {
+                        log.info(`Migration v6: dropped ${orphanCount} orphan alert rule(s)`);
+                    }
+
+                    // 2. Table swap: new table with FK, copy rows, drop old, rename.
+                    // DROP first in case a previous failed run left a partial
+                    // alert_rules_new behind (would otherwise collide on insert).
+                    db.exec(`
+                        DROP TABLE IF EXISTS alert_rules_new;
+                        CREATE TABLE alert_rules_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            target_id TEXT,
+                            rule_type TEXT NOT NULL,
+                            condition TEXT NOT NULL,
+                            enabled INTEGER DEFAULT 1,
+                            created_at INTEGER NOT NULL,
+                            fire_count_24h INTEGER NOT NULL DEFAULT 0,
+                            last_fire_at INTEGER,
+                            auto_suppressed INTEGER NOT NULL DEFAULT 0,
+                            fatigue_threshold INTEGER NOT NULL DEFAULT 20,
+                            composite_condition TEXT,
+                            digest_mode INTEGER NOT NULL DEFAULT 0,
+                            FOREIGN KEY (target_id) REFERENCES targets(user_id) ON DELETE CASCADE ON UPDATE CASCADE
+                        );
+                        INSERT INTO alert_rules_new
+                            SELECT id, target_id, rule_type, condition, enabled, created_at,
+                                   fire_count_24h, last_fire_at, auto_suppressed,
+                                   fatigue_threshold, composite_condition, digest_mode
+                            FROM alert_rules;
+                        DROP TABLE alert_rules;
+                        ALTER TABLE alert_rules_new RENAME TO alert_rules;
+                        CREATE INDEX IF NOT EXISTS idx_alert_rules_target
+                            ON alert_rules(target_id) WHERE target_id IS NOT NULL;
+                        CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled
+                            ON alert_rules(enabled, rule_type);
+                    `);
+                });
+
+                migrate();
+                log.info("Migration v6: alert_rules recreated with FK to targets");
+            } catch (err: any) {
+                log.error(`Migration v6 failed: ${err.message}`);
+                throw err;
+            } finally {
+                db.pragma("foreign_keys = ON");
+            }
             break;
         }
 
