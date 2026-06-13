@@ -176,6 +176,12 @@ function closeVoiceSession(targetId: string, state: VoiceState, now: number): vo
     }
 }
 
+/** Drop the in-memory voice + co-participant state for a target. */
+export function removeTargetState(targetId: string): void {
+    currentVoiceState.delete(targetId);
+    coParticipantCache.delete(targetId);
+}
+
 export function updateCoParticipants(targetId: string, participants: string[]): void {
     const existing = coParticipantCache.get(targetId) || new Set();
     for (const p of participants) {

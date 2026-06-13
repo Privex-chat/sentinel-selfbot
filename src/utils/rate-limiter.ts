@@ -28,6 +28,20 @@ export class RateLimiter {
     private globalResetAt = 0;
     private lastRequestAt = 0;
 
+    constructor() {
+        // Prune buckets whose reset window expired more than 5 minutes ago.
+        // Each unique URL (including its query string) gets its own bucket;
+        // without this the Map grows unbounded for long-running deployments
+        // that touch a wide range of profile/channel/message endpoints.
+        const evict = setInterval(() => {
+            const cutoff = Date.now() - 5 * 60_000;
+            for (const [key, b] of this.buckets) {
+                if (b.resetAt < cutoff) this.buckets.delete(key);
+            }
+        }, 60_000);
+        evict.unref?.();
+    }
+
     async waitForBucket(route: string): Promise<void> {
         const now = Date.now();
 

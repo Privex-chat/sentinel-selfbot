@@ -118,6 +118,11 @@ export function startConnectedAccountsPoller(): void {
     }, withJitter(90_000));
 }
 
+/** Drop the cached last-known connected-accounts map for this target. */
+export function removeTargetState(targetId: string): void {
+    lastKnownAccounts.delete(targetId);
+}
+
 export function stopConnectedAccountsPoller(): void {
     if (firstPollTimeout) {
         clearTimeout(firstPollTimeout);

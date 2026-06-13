@@ -86,6 +86,14 @@ export function handleGuildMemberUpdate(targetId: string, guildId: string, data:
     memberCache.set(key, { nick: newNick, roles: newRoles });
 }
 
+/** Drop every guild-member cache entry that begins with this target's id. */
+export function removeTargetState(targetId: string): void {
+    const prefix = `${targetId}:`;
+    for (const key of memberCache.keys()) {
+        if (key.startsWith(prefix)) memberCache.delete(key);
+    }
+}
+
 export function initMemberData(targetId: string, guildId: string, data: any): void {
     const key = cacheKey(targetId, guildId);
     memberCache.set(key, {

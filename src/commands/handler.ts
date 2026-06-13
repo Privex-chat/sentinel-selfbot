@@ -37,6 +37,7 @@ import { getCurrentPresence } from "../collectors/presence";
 import { getCurrentActivities } from "../collectors/activity";
 import { reloadRules } from "../alerts/engine";
 import { loadRuntimeConfig, triggerAllConfigListeners } from "../runtime-config";
+import { onTargetRemoved } from "../target-lifecycle";
 import type { GatewayClient } from "../gateway/client";
 
 const log = createLogger("Commands");
@@ -206,6 +207,8 @@ async function cmdRemove(channelId: string, args: string[]): Promise<void> {
     }
 
     getStmts().deleteTarget.run(userId);
+    // Wipe the in-memory caches that the SQL cascade does not touch.
+    onTargetRemoved(userId);
     await sendTempMessage(channelId, `✅ Target \`${userId}\` removed.`);
     log.info(`Command: removed target ${userId}`);
 }

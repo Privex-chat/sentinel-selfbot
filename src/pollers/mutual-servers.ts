@@ -104,6 +104,11 @@ export function startMutualServersPoller(): void {
     }, withJitter(60_000));
 }
 
+/** Drop the cached last-known guild set for this target. Called on target delete. */
+export function removeTargetState(targetId: string): void {
+    lastKnownGuildIds.delete(targetId);
+}
+
 export function stopMutualServersPoller(): void {
     if (firstPollTimeout) {
         clearTimeout(firstPollTimeout);

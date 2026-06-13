@@ -215,6 +215,11 @@ export function handleActivityUpdate(targetId: string, activities: any[]): void 
     currentActivities.set(targetId, updatedTracked);
 }
 
+/** Drop the in-memory activity state for a target. Called when a target is deleted. */
+export function removeTargetState(targetId: string): void {
+    currentActivities.delete(targetId);
+}
+
 export function initActivities(targetId: string, activities: any[]): void {
     const stmts = getStmts();
     const now = Date.now();

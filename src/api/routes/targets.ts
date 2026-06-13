@@ -4,6 +4,7 @@ import { getDb } from "../../database/connection";
 import { config } from "../../utils/config";
 import { startBackfillForTarget } from "../../backfill/backfill-engine";
 import { requestPresenceForUser } from "../../pollers/status-poller";
+import { onTargetRemoved } from "../../target-lifecycle";
 
 // How long to wait after adding a target before kicking off the backfill.
 // Adding a target already triggers a profile fetch for mutual guilds — doing
@@ -70,6 +71,10 @@ export function registerTargetRoutes(app: FastifyInstance): void {
     app.delete<{ Params: { userId: string } }>("/api/targets/:userId", async (req) => {
         const stmts = getStmts();
         stmts.deleteTarget.run(req.params.userId);
+        // SQL cascade handles every child row; this clears the in-memory caches
+        // (presence, activities, voice, typing pendings, guild-member, pollers,
+        // alert composite tracker) that the cascade does not touch.
+        onTargetRemoved(req.params.userId);
         return { success: true };
     });
 

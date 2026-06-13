@@ -50,6 +50,14 @@ function cleanupStaleCompositeState(): void {
 
 setInterval(cleanupStaleCompositeState, 60_000).unref?.();
 
+/** Drop every composite-tracker entry for this target across all rules. */
+export function removeTargetState(targetId: string): void {
+    for (const [ruleId, targetMap] of compositeTracker) {
+        targetMap.delete(targetId);
+        if (!targetMap.size) compositeTracker.delete(ruleId);
+    }
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export function setAlertCallback(cb: AlertCallback): void {

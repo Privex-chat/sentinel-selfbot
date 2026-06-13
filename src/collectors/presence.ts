@@ -96,6 +96,11 @@ export function handlePresenceUpdate(targetId: string, data: any): void {
     currentPresence.set(targetId, { status: newStatus, platform, clientStatus });
 }
 
+/** Drop the in-memory presence state for a target. Called when a target is deleted. */
+export function removeTargetState(targetId: string): void {
+    currentPresence.delete(targetId);
+}
+
 export function initPresence(targetId: string, data: any): void {
     const status       = data.status || "offline";
     const clientStatus = data.client_status || null;

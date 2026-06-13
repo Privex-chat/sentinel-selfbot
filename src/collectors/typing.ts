@@ -17,9 +17,34 @@ const pendingTyping: Map<string, PendingTyping> = new Map();
 const typingCooldowns: Map<string, number> = new Map();
 const GHOST_TIMEOUT_MS = 15000;
 const COOLDOWN_MS = 5000;
+const COOLDOWN_EVICT_INTERVAL_MS = 60_000;
+// Cooldown entries are dead once `2 × COOLDOWN_MS` has passed without a new
+// TYPING_START in that channel. Prune them so the Map doesn't grow forever as
+// the bot observes new (target, channel) pairs over multi-week uptimes.
+const cooldownEvictTimer = setInterval(() => {
+    const cutoff = Date.now() - COOLDOWN_MS * 2;
+    for (const [key, ts] of typingCooldowns) {
+        if (ts < cutoff) typingCooldowns.delete(key);
+    }
+}, COOLDOWN_EVICT_INTERVAL_MS);
+cooldownEvictTimer.unref?.();
 
 function typingKey(userId: string, channelId: string): string {
     return `${userId}:${channelId}`;
+}
+
+/** Drop every pending-typing timeout and cooldown entry for this target. */
+export function removeTargetState(targetId: string): void {
+    const prefix = `${targetId}:`;
+    for (const [key, pending] of pendingTyping) {
+        if (key.startsWith(prefix)) {
+            clearTimeout(pending.timeout);
+            pendingTyping.delete(key);
+        }
+    }
+    for (const key of typingCooldowns.keys()) {
+        if (key.startsWith(prefix)) typingCooldowns.delete(key);
+    }
 }
 
 export function handleTypingStart(targetId: string, channelId: string, guildId: string | null): void {
