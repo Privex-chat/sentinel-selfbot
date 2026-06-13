@@ -1,42 +1,14 @@
 import { createLogger } from "../utils/logger";
 import { config } from "../utils/config";
 import { pushSSEEvent } from "../api/routes/events";
-import { enqueueWebhook } from "../utils/webhook-queue";
 
 const log = createLogger("AlertDigest");
 
-const DISCORD_RE = /https?:\/\/(?:discord\.com|discordapp\.com)\/api\/webhooks\//i;
-
-function sendDigestWebhook(entries: DigestEntry[]): void {
-    if (!config.alertWebhookUrl) return;
-
-    const isDiscord = DISCORD_RE.test(config.alertWebhookUrl);
-    const lines = entries.map(e =>
-        e.count > 1
-            ? `**[${e.alertType.replace(/_/g, " ")}]** (×${e.count}) ${e.message}`
-            : `**[${e.alertType.replace(/_/g, " ")}]** ${e.message}`
-    );
-
-    const body = isDiscord
-        ? JSON.stringify({
-            username: "Sentinel",
-            content: `**[DIGEST — ${entries.length} alert${entries.length === 1 ? "" : "s"}]**\n${lines.join("\n")}`.slice(0, 2000),
-        })
-        : JSON.stringify({
-            event: "alert_digest",
-            alerts: entries.map(e => ({
-                ruleId: e.ruleId,
-                targetId: e.targetId,
-                alertType: e.alertType,
-                message: e.message,
-                count: e.count,
-            })),
-            timestamp: Date.now(),
-        });
-
-    enqueueWebhook(config.alertWebhookUrl, body, "digest");
-    log.info(`Digest webhook queued (${entries.length} alerts)`);
-}
+// Digest mode batches alert *display* into a single SSE event per (target,
+// rule_type) every config.alertDigestIntervalMs. Webhook delivery is
+// intentionally NOT batched — fireAlert sends the immediate per-event webhook
+// in alerts/engine.ts. Digest is SSE-only so the dashboard live feed isn't
+// spammed during a burst; the operator still gets one webhook per real event.
 
 interface DigestEntry {
     ruleId: number;
@@ -70,19 +42,17 @@ function flushDigest(): void {
     if (!digestBuffer.size) return;
 
     const now = Date.now();
-    const allEntries: DigestEntry[] = [];
 
-    // Group by target
+    // Group by target and emit one SSE event per target. No webhook side effect —
+    // immediate webhook delivery is the only delivery mode (see fireAlert).
     const byTarget = new Map<string, DigestEntry[]>();
     for (const entry of digestBuffer.values()) {
         const arr = byTarget.get(entry.targetId) || [];
         arr.push(entry);
         byTarget.set(entry.targetId, arr);
-        allEntries.push(entry);
     }
 
     for (const [targetId, entries] of byTarget) {
-        // Emit one digest SSE event per target
         pushSSEEvent({
             target_id: targetId,
             event_type: "ALERT_DIGEST",
@@ -94,9 +64,6 @@ function flushDigest(): void {
     }
 
     digestBuffer.clear();
-
-    // Send one webhook call covering all buffered alerts
-    sendDigestWebhook(allEntries);
 }
 
 export function startDigestFlusher(): NodeJS.Timeout {

@@ -24,7 +24,19 @@ function analyzeContent(content: string) {
     };
 }
 
-export function handleMessageCreate(targetId: string, message: any, guildId: string | null, source: "live" | "backfilled" = "live"): string {
+export interface MessageCreateResult {
+    /** Processed event payload (JSON string). Empty when inserted === false. */
+    eventData: string;
+    /** True only when the row was actually inserted (not a duplicate). */
+    inserted: boolean;
+}
+
+export function handleMessageCreate(
+    targetId: string,
+    message: any,
+    guildId: string | null,
+    source: "live" | "backfilled" = "live"
+): MessageCreateResult {
     const stmts = getStmts();
     const now = Date.now();
     const content = (message.content || "").substring(0, 2000);
@@ -38,7 +50,7 @@ export function handleMessageCreate(targetId: string, message: any, guildId: str
     const hasSticker = message.sticker_items?.length > 0 ? 1 : 0;
     const createdAt = message.timestamp ? new Date(message.timestamp).getTime() : now;
 
-    stmts.insertMessage.run(
+    const result = stmts.insertMessage.run(
         message.id,
         targetId,
         message.channel_id,
@@ -59,6 +71,15 @@ export function handleMessageCreate(targetId: string, message: any, guildId: str
         source
     );
 
+    // INSERT OR IGNORE: duplicate (e.g. backfill re-seen a message already saved
+    // by a live event). Skip the side effects so we don't double-count, double-
+    // fire MESSAGE_CREATE event rows, double-evaluate alerts, or wrongly resolve
+    // a pending typing event from an old message.
+    if (result.changes === 0) {
+        log.debug(`${targetId}: skipping duplicate message ${message.id} (${source})`);
+        return { eventData: "", inserted: false };
+    }
+
     const eventData = JSON.stringify({
         messageId: message.id,
         channelId: message.channel_id,
@@ -76,7 +97,7 @@ export function handleMessageCreate(targetId: string, message: any, guildId: str
     resolveTypingWithMessage(targetId, message.channel_id);
 
     log.debug(`${targetId}: ${source} message in ${message.channel_id} (${analysis.wordCount} words)`);
-    return eventData;
+    return { eventData, inserted: true };
 }
 
 export function handleMessageUpdate(targetId: string, message: any, guildId: string | null): void {

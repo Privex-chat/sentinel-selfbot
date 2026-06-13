@@ -283,8 +283,13 @@ function setupGatewayHandlers(client: GatewayClient): void {
                     if (!authorId || !isTarget(authorId)) break;
                     if (data.author.bot) break;
                     log.info(`MESSAGE_CREATE from tracked target ${authorId} in guild ${data.guild_id || "DM"}`);
-                    const msgEventData = handleMessageCreate(authorId, data, data.guild_id || null, "live");
-                    evaluateEvent("MESSAGE_CREATE", authorId, msgEventData);
+                    const msgResult = handleMessageCreate(authorId, data, data.guild_id || null, "live");
+                    // Duplicate live MESSAGE_CREATE (collector saw the same id twice during
+                    // reconnect, or backfill already stored it). Skip alert eval + SSE so
+                    // the dashboard live feed doesn't double-display and webhooks don't
+                    // double-fire.
+                    if (!msgResult.inserted) break;
+                    evaluateEvent("MESSAGE_CREATE", authorId, msgResult.eventData);
                     pushSSEEvent({
                         target_id:  authorId,
                         event_type: "MESSAGE_CREATE",

@@ -1,7 +1,10 @@
 import { FastifyInstance } from "fastify";
 import { getStmts } from "../../database/queries";
 import { reloadRules } from "../../alerts/engine";
+import { ALERT_TYPES } from "../../alerts/conditions";
 import { config } from "../../utils/config";
+
+const VALID_RULE_TYPES = new Set<string>(Object.values(ALERT_TYPES));
 
 export function registerAlertRoutes(app: FastifyInstance): void {
 
@@ -19,10 +22,46 @@ export function registerAlertRoutes(app: FastifyInstance): void {
             fatigueThreshold?: number;
             compositeCondition?: any;
         };
-    }>("/api/alerts/rules", async (req) => {
+    }>("/api/alerts/rules", async (req, reply) => {
         const { targetId, ruleType, condition, digestMode, fatigueThreshold, compositeCondition } = req.body;
-        const stmts = getStmts();
 
+        // Validate ruleType against the canonical enum so unknown values (typos,
+        // deleted rule types) don't get inserted as dead rules that never fire.
+        if (typeof ruleType !== "string" || !VALID_RULE_TYPES.has(ruleType)) {
+            return reply.code(400).send({
+                error: `Invalid ruleType. Must be one of: ${[...VALID_RULE_TYPES].join(", ")}`,
+            });
+        }
+
+        // Validate composite shape if provided. The hot path assumes
+        // composite_condition is either null or has an array of sub-rules with
+        // valid rule_type fields; rejecting bad input here keeps reloadRules'
+        // parse step from silently dropping the rule.
+        if (compositeCondition !== undefined && compositeCondition !== null) {
+            if (typeof compositeCondition !== "object" || Array.isArray(compositeCondition)) {
+                return reply.code(400).send({ error: "compositeCondition must be an object" });
+            }
+            if (!Array.isArray(compositeCondition.conditions) || compositeCondition.conditions.length === 0) {
+                return reply.code(400).send({ error: "compositeCondition.conditions must be a non-empty array" });
+            }
+            for (const sub of compositeCondition.conditions) {
+                if (!sub || typeof sub !== "object" || typeof sub.rule_type !== "string") {
+                    return reply.code(400).send({ error: "Every composite sub-condition needs a string rule_type" });
+                }
+                if (!VALID_RULE_TYPES.has(sub.rule_type)) {
+                    return reply.code(400).send({ error: `Invalid composite sub rule_type: ${sub.rule_type}` });
+                }
+            }
+            if (compositeCondition.window_ms !== undefined && typeof compositeCondition.window_ms !== "number") {
+                return reply.code(400).send({ error: "compositeCondition.window_ms must be a number when provided" });
+            }
+        }
+
+        if (fatigueThreshold !== undefined && (typeof fatigueThreshold !== "number" || fatigueThreshold < 1)) {
+            return reply.code(400).send({ error: "fatigueThreshold must be a positive integer" });
+        }
+
+        const stmts = getStmts();
         const result = stmts.insertAlertRule.run(
             targetId || null,
             ruleType,

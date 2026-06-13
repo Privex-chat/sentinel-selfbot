@@ -187,11 +187,15 @@ async function processChannel(
             const messages = await res.json() as any[];
             if (!messages.length) break;
 
-            // Filter to target's messages and insert (source='backfilled' suppresses alert evaluation)
+            // Filter to target's messages and insert (source='backfilled' suppresses
+            // alert evaluation). Only count messages we actually inserted — INSERT OR
+            // IGNORE means re-running over a partially-backfilled channel used to
+            // inflate messagesFound by the number of attempts, not the number of new
+            // rows. Resumes over the same channel now report accurate progress.
             for (const msg of messages) {
                 if (msg.author?.id === targetId) {
-                    handleMessageCreate(targetId, msg, guildId, "backfilled");
-                    messagesFound++;
+                    const insertResult = handleMessageCreate(targetId, msg, guildId, "backfilled");
+                    if (insertResult.inserted) messagesFound++;
                 }
             }
 

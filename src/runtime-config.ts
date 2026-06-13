@@ -46,6 +46,13 @@ export type RuntimeKey = typeof RUNTIME_KEYS[number];
 type ChangeCallback = (key: RuntimeKey, value: string) => void;
 const changeListeners = new Map<RuntimeKey, ChangeCallback[]>();
 
+// Allowed enum values for keys that must match a fixed set. Validated before
+// the value is persisted so a bad value can never silently become "none" (the
+// createAIProvider fallback) and surprise the operator with disabled AI.
+const ENUM_VALUES: Partial<Record<RuntimeKey, readonly string[]>> = {
+    AI_PROVIDER: ["none", "ollama", "openai", "anthropic", "gemini"],
+};
+
 // Minimum values for interval/numeric keys to prevent degenerate configurations.
 const NUMERIC_MIN: Partial<Record<RuntimeKey, number>> = {
     AI_ANALYSIS_INTERVAL_MS:          60_000,    // 1 min
@@ -77,7 +84,7 @@ const KEY_MAP: Record<RuntimeKey, { prop: keyof typeof config; parse: (v: string
     SUPABASE_URL:                     { prop: "supabaseUrl",               parse: v => v },
     SUPABASE_SERVICE_KEY:             { prop: "supabaseServiceKey",        parse: v => v },
     SUPABASE_SYNC_INTERVAL_MS:        { prop: "supabaseSyncIntervalMs",    parse: v => parseInt(v, 10) },
-    BACKFILL_ENABLED:                 { prop: "backfillEnabled",           parse: v => v !== "false" },
+    BACKFILL_ENABLED:                 { prop: "backfillEnabled",           parse: v => v === "true" },
     BACKFILL_MAX_DAYS:                { prop: "backfillMaxDays",           parse: v => parseInt(v, 10) },
     BACKFILL_MAX_MESSAGES_PER_CHANNEL:{ prop: "backfillMaxMsgsPerChannel", parse: v => parseInt(v, 10) },
     ALERT_DIGEST_MODE:                { prop: "alertDigestMode",           parse: v => v === "true" },
@@ -111,6 +118,12 @@ function validateRuntimeValue(key: RuntimeKey, value: string): string | null {
         if (h > 23 || m > 59) {
             return "BRIEF_GENERATION_TIME must be a valid time (00:00–23:59)";
         }
+    }
+
+    // Enum checks (e.g. AI_PROVIDER)
+    const allowed = ENUM_VALUES[key];
+    if (allowed && !allowed.includes(value)) {
+        return `${key} must be one of: ${allowed.join(", ")}`;
     }
 
     // Numeric range checks

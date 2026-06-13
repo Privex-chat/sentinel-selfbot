@@ -1,8 +1,9 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
-import { AlertCondition, AlertRule, EVENT_TO_ALERT_MAP } from "./conditions";
+import { AlertCondition, AlertRule, EVENT_TO_ALERT_MAP, ParsedComposite } from "./conditions";
 import { config } from "../utils/config";
 import { enqueueWebhook } from "../utils/webhook-queue";
+import { addToDigest } from "./digest";
 
 const log = createLogger("AlertEngine");
 
@@ -33,11 +34,7 @@ function cleanupStaleCompositeState(): void {
             compositeTracker.delete(ruleId);
             continue;
         }
-        let windowMs = 300_000;
-        try {
-            const cc = JSON.parse(rule.composite_condition);
-            windowMs = cc.window_ms || 300_000;
-        } catch { }
+        const windowMs = rule.composite_condition.window_ms || 300_000;
 
         for (const [targetId, state] of targetMap) {
             if (now - state.firstSatisfiedAt > windowMs) {
@@ -74,7 +71,10 @@ export function reloadRules(): void {
         last_fire_at:        r.last_fire_at         ?? null,
         auto_suppressed:     r.auto_suppressed      ?? 0,
         fatigue_threshold:   r.fatigue_threshold    ?? config.alertFatigueThreshold,
-        composite_condition: r.composite_condition  ?? null,
+        // Parse composite_condition ONCE on load. The hot path used to JSON.parse
+        // on every event + every cleanup tick — for a busy install with several
+        // composite rules that's tens of parses per second.
+        composite_condition: parseComposite(r.composite_condition),
         digest_mode:         r.digest_mode          ?? 0,
     }));
     log.info(`Loaded ${cachedRules.length} active alert rules`);
@@ -82,6 +82,23 @@ export function reloadRules(): void {
 
 function parseCondition(raw: string): AlertCondition {
     try { return JSON.parse(raw); } catch { return {}; }
+}
+
+function parseComposite(raw: string | null | undefined): ParsedComposite | null {
+    if (!raw) return null;
+    try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.conditions)) {
+            return null;
+        }
+        return {
+            operator:   typeof parsed.operator === "string" ? parsed.operator : "AND",
+            window_ms:  typeof parsed.window_ms === "number" ? parsed.window_ms : 300_000,
+            conditions: parsed.conditions,
+        };
+    } catch {
+        return null;
+    }
 }
 
 export function evaluateEvent(
@@ -139,9 +156,8 @@ function handleCompositeRule(
     eventData: any,
     ts: number
 ): void {
-    let cc: { operator: string; window_ms: number; conditions: any[] };
-    try { cc = JSON.parse(rule.composite_condition!); }
-    catch { return; }
+    const cc = rule.composite_condition;
+    if (!cc) return;
 
     const windowMs = cc.window_ms || 300_000;
 
@@ -357,12 +373,11 @@ function routeAlert(
     // Always fire the webhook immediately
     fireAlert(rule, targetId, eventType, eventData);
 
-    // Optionally also buffer into digest for SSE display
+    // Optionally also buffer into digest for SSE display (no webhook side effect —
+    // digest is SSE-only; webhook delivery already fired above)
     if (config.alertDigestMode || rule.digest_mode === 1) {
         const message = generateAlertMessage(rule, targetId, eventType, eventData);
-        import("./digest").then(({ addToDigest }) => {
-            addToDigest(rule.id, targetId, rule.rule_type, message, Date.now());
-        }).catch(() => { });
+        addToDigest(rule.id, targetId, rule.rule_type, message, Date.now());
     }
 }
 

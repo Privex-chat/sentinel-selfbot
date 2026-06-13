@@ -30,12 +30,21 @@ export function handleVoiceStateUpdate(targetId: string, data: any): void {
     const current = currentVoiceState.get(targetId);
 
     const newChannelId = data.channel_id || null;
-    const guildId = data.guild_id || "";
+    const guildId: string | null = data.guild_id || null;
     const selfMute = !!data.self_mute;
     const selfDeaf = !!data.self_deaf;
     const serverMute = !!data.mute;
     const serverDeaf = !!data.deaf;
     const streaming = !!data.self_stream;
+
+    // Skip DM voice (no guild_id). voice_sessions.guild_id is NOT NULL; the
+    // previous behaviour stored "" which produced ghost guildless rows that
+    // never matched any per-guild filter. DMs and group-DM voice are routed
+    // through a separate Discord subsystem we don't track here.
+    if (newChannelId && !guildId) {
+        log.debug(`${targetId}: skipping DM voice update (no guild_id)`);
+        return;
+    }
 
     // User left voice
     if (!newChannelId) {
@@ -78,7 +87,9 @@ export function handleVoiceStateUpdate(targetId: string, data: any): void {
         });
         log.debug(`${targetId}: moved voice ${current.channelId} -> ${newChannelId}`);
 
-        openVoiceSession(targetId, guildId, newChannelId, null, now, selfMute, selfDeaf, serverMute, serverDeaf, streaming);
+        // guildId is non-null in this branch: we returned earlier when
+        // newChannelId is truthy but guildId is null (DM voice guard).
+        openVoiceSession(targetId, guildId!, newChannelId, null, now, selfMute, selfDeaf, serverMute, serverDeaf, streaming);
         const joinData = JSON.stringify({ guildId, channelId: newChannelId });
         stmts.insertEvent.run(targetId, "VOICE_JOIN", now, joinData, guildId, newChannelId);
         evaluateEvent("VOICE_JOIN", targetId, joinData, now);
@@ -93,7 +104,8 @@ export function handleVoiceStateUpdate(targetId: string, data: any): void {
 
     // User joined voice (no previous state)
     if (!current) {
-        openVoiceSession(targetId, guildId, newChannelId, null, now, selfMute, selfDeaf, serverMute, serverDeaf, streaming);
+        // guildId is non-null: same DM-voice guard above.
+        openVoiceSession(targetId, guildId!, newChannelId, null, now, selfMute, selfDeaf, serverMute, serverDeaf, streaming);
 
         const joinData = JSON.stringify({ guildId, channelId: newChannelId });
         stmts.insertEvent.run(targetId, "VOICE_JOIN", now, joinData, guildId, newChannelId);

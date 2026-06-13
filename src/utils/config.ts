@@ -80,7 +80,10 @@ export const config = {
     // ── Backfill ──────────────────────────────────────────────────────────────
     backfillMaxDays:       parseInt(process.env.BACKFILL_MAX_DAYS || "90", 10),
     backfillMaxMsgsPerChannel: parseInt(process.env.BACKFILL_MAX_MESSAGES_PER_CHANNEL || "5000", 10),
-    backfillEnabled:       process.env.BACKFILL_ENABLED !== "false",
+    // Explicit `=== "true"` with an explicit default so any unset / typo'd value
+    // behaves predictably. Earlier `!== "false"` accepted "True", "1", and empty
+    // strings as enabled, which silently surprised users who set "0" expecting off.
+    backfillEnabled:       (process.env.BACKFILL_ENABLED ?? "true") === "true",
 
     // ── Alerts ────────────────────────────────────────────────────────────────
     alertDigestMode:       process.env.ALERT_DIGEST_MODE === "true",

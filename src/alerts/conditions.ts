@@ -8,6 +8,15 @@ export interface AlertCondition {
     end_hour?: number;
 }
 
+/** Parsed composite-rule envelope. The raw form on disk is a JSON string;
+ *  reloadRules() parses it once and caches this shape on every AlertRule so
+ *  the hot path doesn't re-parse on every event. */
+export interface ParsedComposite {
+    operator: string;
+    window_ms: number;
+    conditions: Array<{ rule_type: string; condition?: AlertCondition }>;
+}
+
 export interface AlertRule {
     id: number;
     target_id: string | null;
@@ -20,7 +29,7 @@ export interface AlertRule {
     last_fire_at: number | null;
     auto_suppressed: number;
     fatigue_threshold: number;
-    composite_condition: string | null;
+    composite_condition: ParsedComposite | null;
     digest_mode: number;
 }
 
