@@ -21,8 +21,7 @@ import { removeTargetState as removeFromActivity } from "./collectors/activity";
 import { removeTargetState as removeFromVoice } from "./collectors/voice";
 import { removeTargetState as removeFromTyping } from "./collectors/typing";
 import { removeTargetState as removeFromGuildMember } from "./collectors/guild-member";
-import { removeTargetState as removeFromMutualServers } from "./pollers/mutual-servers";
-import { removeTargetState as removeFromConnectedAccounts } from "./pollers/connected-accounts";
+import { removeTargetState as removeFromTargetProfilePoller } from "./pollers/target-profile-poller";
 import { removeTargetState as removeFromAlertEngine } from "./alerts/engine";
 import { invalidateSocialGraphCache } from "./analyzers/social-graph";
 import { cancelBackfill } from "./backfill/backfill-engine";
@@ -99,8 +98,7 @@ export function onTargetRemoved(userId: string): void {
     try { removeFromVoice(userId); }             catch (err: any) { log.warn(`voice cleanup: ${err.message}`); }
     try { removeFromTyping(userId); }            catch (err: any) { log.warn(`typing cleanup: ${err.message}`); }
     try { removeFromGuildMember(userId); }       catch (err: any) { log.warn(`guild-member cleanup: ${err.message}`); }
-    try { removeFromMutualServers(userId); }     catch (err: any) { log.warn(`mutual-servers cleanup: ${err.message}`); }
-    try { removeFromConnectedAccounts(userId); } catch (err: any) { log.warn(`connected-accounts cleanup: ${err.message}`); }
+    try { removeFromTargetProfilePoller(userId); } catch (err: any) { log.warn(`target-profile poller cleanup: ${err.message}`); }
     try { removeFromAlertEngine(userId); }       catch (err: any) { log.warn(`alert-engine cleanup: ${err.message}`); }
     try { invalidateSocialGraphCache(userId); }  catch (err: any) { log.warn(`social-graph cache cleanup: ${err.message}`); }
     // Drop from the active-target cache too — caller already removed the SQL

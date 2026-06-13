@@ -25,13 +25,11 @@ import { handleReactionAdd, handleReactionRemove } from "./collectors/reaction";
 import { handleSelfCommand, setGatewayRef } from "./commands/handler";
 import { handleGuildMemberUpdate } from "./collectors/guild-member";
 import { handleChannelCreate } from "./collectors/dm-detection";
-import { startProfilePoller, stopProfilePoller } from "./pollers/profile-poller";
+import { startTargetProfilePoller, stopTargetProfilePoller } from "./pollers/target-profile-poller";
 import {
     startStatusPoller, stopStatusPoller, setRequestGuildMembersFn,
     setSelfbotGuildsFn, setSubscribePresenceFn,
 } from "./pollers/status-poller";
-import { startMutualServersPoller, stopMutualServersPoller } from "./pollers/mutual-servers";
-import { startConnectedAccountsPoller, stopConnectedAccountsPoller } from "./pollers/connected-accounts";
 import { startApiServer } from "./api/server";
 import { pushSSEEvent } from "./api/routes/events";
 import { setAlertCallback, reloadRules, evaluateEvent, resetAlertFireCounts } from "./alerts/engine";
@@ -621,10 +619,8 @@ function shutdown(): void {
     cancelBriefGeneration();
     if (presenceSubscriptionInterval) clearInterval(presenceSubscriptionInterval);
 
-    stopProfilePoller();
+    stopTargetProfilePoller();
     stopStatusPoller();
-    stopMutualServersPoller();
-    stopConnectedAccountsPoller();
 
     supabaseSync?.stop();
 
@@ -734,10 +730,8 @@ async function main(): Promise<void> {
     setupGatewayHandlers(gateway);
     await gateway.connect();
 
-    startProfilePoller();
+    startTargetProfilePoller();
     startStatusPoller();
-    startMutualServersPoller();
-    startConnectedAccountsPoller();
 
     startVoiceParticipantTracker(gateway);
 
