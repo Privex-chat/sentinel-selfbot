@@ -40,7 +40,9 @@ function dayNum(dateStr: string): number {
 function buildBriefStats(targetId: string, dateStr: string): BriefStats {
     const db = getDb();
     const stmts = getStmts();
-    const dayStart = new Date(dateStr + "T00:00:00").getTime();
+    // dateStr is a UTC date (YYYY-MM-DD derived from toISOString()). Compute day
+    // boundaries in UTC so day-edge events are counted under the matching date.
+    const dayStart = new Date(dateStr + "T00:00:00Z").getTime();
     const dayEnd = dayStart + 86_400_000;
 
     // Daily summary row
@@ -266,7 +268,18 @@ async function generateBriefsForDate(dateStr: string): Promise<void> {
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────
 
+// Tracked so the entire timeout chain — not just the first arm — can be cancelled
+// when BRIEF_GENERATION_TIME changes at runtime. Previously only the first tick
+// was tracked; the inner re-arm fired regardless of cancellation, doubling the
+// daily AI cost when the operator rescheduled.
+let scheduledTickHandle: NodeJS.Timeout | null = null;
+let backfillStartupHandle: NodeJS.Timeout | null = null;
+let scheduleCancelled = false;
+
 export function scheduleBriefGeneration(): NodeJS.Timeout {
+    // Reset cancellation flag for the new schedule.
+    scheduleCancelled = false;
+
     const [hStr, mStr] = config.briefGenerationTime.split(":");
     const targetHour = parseInt(hStr, 10);
     const targetMinute = parseInt(mStr, 10);
@@ -274,28 +287,36 @@ export function scheduleBriefGeneration(): NodeJS.Timeout {
     function msUntilNext(): number {
         const now = new Date();
         const next = new Date();
-        next.setHours(targetHour, targetMinute, 0, 0);
+        // BRIEF_GENERATION_TIME is documented as UTC; use setUTCHours so the
+        // schedule fires at the documented wall-clock time regardless of the
+        // host's local TZ (relevant for self-hosted, not for Railway/Fly which
+        // already run in UTC).
+        next.setUTCHours(targetHour, targetMinute, 0, 0);
         if (next.getTime() <= now.getTime()) {
-            next.setDate(next.getDate() + 1);
+            next.setUTCDate(next.getUTCDate() + 1);
         }
         return next.getTime() - now.getTime();
     }
 
     function prevDateStr(): string {
         const d = new Date();
-        d.setDate(d.getDate() - 1);
+        d.setUTCDate(d.getUTCDate() - 1);
         return d.toISOString().split("T")[0];
     }
 
-    // Backfill missing briefs for past 7 days, 5 min after startup
-    setTimeout(async () => {
+    // Backfill missing briefs for past 7 days, 5 min after (re)schedule.
+    backfillStartupHandle = setTimeout(async () => {
+        backfillStartupHandle = null;
+        if (scheduleCancelled) return;
         const stmts = getStmts();
         const targets = stmts.getActiveTargets.all() as any[];
         for (let i = 1; i <= 7; i++) {
+            if (scheduleCancelled) return;
             const d = new Date();
-            d.setDate(d.getDate() - i);
+            d.setUTCDate(d.getUTCDate() - i);
             const dateStr = d.toISOString().split("T")[0];
             for (const t of targets) {
+                if (scheduleCancelled) return;
                 const existing = stmts.getDailyBriefByDate.get(t.user_id, dateStr);
                 if (!existing) {
                     await generateBrief(t.user_id, dateStr);
@@ -304,17 +325,38 @@ export function scheduleBriefGeneration(): NodeJS.Timeout {
         }
     }, 5 * 60 * 1000);
 
-    // Scheduled daily generation — setTimeout chain avoids accumulating intervals
-    const handle = setTimeout(function tick() {
-        const yesterday = prevDateStr();
-        generateBriefsForDate(yesterday).catch(err =>
-            log.error(`Scheduled brief generation error: ${err.message}`)
-        );
-        setTimeout(tick, 24 * 60 * 60 * 1000);
-    }, msUntilNext());
+    // Scheduled daily generation. Track every arm of the chain so the outer
+    // caller can cancel a still-running schedule cleanly.
+    function arm(delayMs: number): void {
+        scheduledTickHandle = setTimeout(() => {
+            scheduledTickHandle = null;
+            if (scheduleCancelled) return;
+            const yesterday = prevDateStr();
+            generateBriefsForDate(yesterday).catch(err =>
+                log.error(`Scheduled brief generation error: ${err.message}`)
+            );
+            arm(24 * 60 * 60 * 1000);
+        }, delayMs);
+    }
+    arm(msUntilNext());
 
-    log.info(`Brief generation scheduled for ${config.briefGenerationTime} daily`);
-    return handle;
+    log.info(`Brief generation scheduled for ${config.briefGenerationTime} UTC daily`);
+    // Returned handle is for compatibility with the previous signature; callers
+    // should prefer cancelBriefGeneration() which cancels the entire chain.
+    return scheduledTickHandle!;
+}
+
+/** Cancel the entire scheduled-tick chain plus the startup backfill. Safe to call before schedule. */
+export function cancelBriefGeneration(): void {
+    scheduleCancelled = true;
+    if (scheduledTickHandle) {
+        clearTimeout(scheduledTickHandle);
+        scheduledTickHandle = null;
+    }
+    if (backfillStartupHandle) {
+        clearTimeout(backfillStartupHandle);
+        backfillStartupHandle = null;
+    }
 }
 
 // ── Manual generation (for API) ───────────────────────────────────────────────

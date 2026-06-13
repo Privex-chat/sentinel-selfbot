@@ -5,8 +5,38 @@ import { notifyDailySummary } from "./utils/webhook-notifier";
 
 const log = createLogger("DailySummary");
 
-// Track the last date we sent summary notifications so we only send once per UTC day.
-let lastNotifiedDate = "";
+// Persist the last-notified date to runtime_config so a restart inside the same
+// UTC day doesn't re-send the daily summary webhook. The in-memory cache avoids
+// a per-call DB read on the hot path.
+const NOTIFIED_KEY = "_internal_last_summary_notified_date";
+let lastNotifiedDate: string | null = null;
+
+function readLastNotifiedDate(): string {
+    if (lastNotifiedDate !== null) return lastNotifiedDate;
+    try {
+        const row = getDb()
+            .prepare("SELECT value FROM runtime_config WHERE key = ?")
+            .get(NOTIFIED_KEY) as { value: string } | undefined;
+        lastNotifiedDate = row?.value ?? "";
+    } catch {
+        lastNotifiedDate = "";
+    }
+    return lastNotifiedDate;
+}
+
+function writeLastNotifiedDate(dateStr: string): void {
+    try {
+        getDb()
+            .prepare(
+                `INSERT INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+            )
+            .run(NOTIFIED_KEY, dateStr, Date.now());
+        lastNotifiedDate = dateStr;
+    } catch (err: any) {
+        log.warn(`Failed to persist last-notified date: ${err.message}`);
+    }
+}
 
 export function computeDailySummaries(): void {
     const stmts = getStmts();
@@ -15,13 +45,17 @@ export function computeDailySummaries(): void {
 
     const today = new Date();
     const dateStr = today.toISOString().split("T")[0];
-    const dayStart = new Date(dateStr + "T00:00:00").getTime();
+    // dateStr is the UTC date — compute day boundaries in UTC so the windowed
+    // queries align with the date label. Previously these used local-time
+    // boundaries which double-counted (or skipped) events at the TZ offset on
+    // any host not running in UTC.
+    const dayStart = new Date(dateStr + "T00:00:00Z").getTime();
     const dayEnd = dayStart + 86400000;
 
     log.info(`Computing daily summaries for ${dateStr} (${targets.length} targets)`);
 
-    const sendNotifications = lastNotifiedDate !== dateStr;
-    if (sendNotifications) lastNotifiedDate = dateStr;
+    const sendNotifications = readLastNotifiedDate() !== dateStr;
+    if (sendNotifications) writeLastNotifiedDate(dateStr);
 
     for (const target of targets) {
         try {

@@ -85,7 +85,7 @@ export function evaluateEvent(
     const alertTypes = EVENT_TO_ALERT_MAP[eventType];
     if (!alertTypes) return;
 
-    log.info(`evaluateEvent: ${eventType} target=${targetId} rules=${cachedRules.length} digestMode=${config.alertDigestMode}`);
+    log.debug(`evaluateEvent: ${eventType} target=${targetId} rules=${cachedRules.length} digestMode=${config.alertDigestMode}`);
 
     const ts = eventTimestamp || Date.now();
 
@@ -94,28 +94,28 @@ export function evaluateEvent(
         const ruleTarget = rule.target_id != null ? String(rule.target_id) : null;
 
         if (ruleTarget && ruleTarget !== targetId) {
-            log.info(`  rule ${rule.id} (${rule.rule_type}): skip — ruleTarget="${ruleTarget}" != "${targetId}"`);
+            log.debug(`  rule ${rule.id} (${rule.rule_type}): skip — ruleTarget="${ruleTarget}" != "${targetId}"`);
             continue;
         }
 
         if (rule.auto_suppressed === 1) {
-            log.info(`  rule ${rule.id} (${rule.rule_type}): skip — auto_suppressed`);
+            log.debug(`  rule ${rule.id} (${rule.rule_type}): skip — auto_suppressed`);
             continue;
         }
 
         if (rule.composite_condition) {
-            log.info(`  rule ${rule.id} (${rule.rule_type}): composite — delegating`);
+            log.debug(`  rule ${rule.id} (${rule.rule_type}): composite — delegating`);
             handleCompositeRule(rule, eventType, targetId, eventData, ts);
             continue;
         }
 
         if (!alertTypes.includes(rule.rule_type)) {
-            log.info(`  rule ${rule.id} (${rule.rule_type}): skip — rule_type not in alertTypes [${alertTypes.join(",")}]`);
+            log.debug(`  rule ${rule.id} (${rule.rule_type}): skip — rule_type not in alertTypes [${alertTypes.join(",")}]`);
             continue;
         }
 
         const matched = matchesCondition(rule, eventType, eventData, ts, targetId);
-        log.info(`  rule ${rule.id} (${rule.rule_type}): matchesCondition=${matched}`);
+        log.debug(`  rule ${rule.id} (${rule.rule_type}): matchesCondition=${matched}`);
         if (matched) {
             routeAlert(rule, targetId, eventType, eventData);
         }

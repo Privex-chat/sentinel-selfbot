@@ -8,6 +8,7 @@ import { handleProfileUpdate } from "../collectors/profile";
 const log = createLogger("ProfilePoller");
 
 let intervalHandle: NodeJS.Timeout | null = null;
+let firstPollTimeout: NodeJS.Timeout | null = null;
 
 /**
  * Fall back to the basic /users/{id} endpoint when the full profile endpoint
@@ -89,13 +90,18 @@ export function startProfilePoller(): void {
         }, withJitter(config.profilePollIntervalMs));
     };
 
-    setTimeout(async () => {
+    firstPollTimeout = setTimeout(async () => {
+        firstPollTimeout = null;
         await pollAllTargets();
         scheduleNext();
     }, 30_000);
 }
 
 export function stopProfilePoller(): void {
+    if (firstPollTimeout) {
+        clearTimeout(firstPollTimeout);
+        firstPollTimeout = null;
+    }
     if (intervalHandle) {
         clearTimeout(intervalHandle);
         intervalHandle = null;

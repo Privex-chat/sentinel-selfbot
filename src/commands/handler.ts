@@ -36,7 +36,7 @@ import { requestPresenceForUser } from "../pollers/status-poller";
 import { getCurrentPresence } from "../collectors/presence";
 import { getCurrentActivities } from "../collectors/activity";
 import { reloadRules } from "../alerts/engine";
-import { loadRuntimeConfig } from "../runtime-config";
+import { loadRuntimeConfig, triggerAllConfigListeners } from "../runtime-config";
 import type { GatewayClient } from "../gateway/client";
 
 const log = createLogger("Commands");
@@ -648,6 +648,11 @@ async function cmdStats(channelId: string): Promise<void> {
 async function cmdReload(channelId: string): Promise<void> {
     try {
         loadRuntimeConfig();
+        // Fire every onConfigChange listener so a reload actually triggers
+        // gateway reconnect, AI provider reset, brief reschedule, etc.
+        // Without this, $reload only updated the in-memory config and rules
+        // without applying the runtime side-effects that the API path applies.
+        triggerAllConfigListeners();
         reloadRules();
         await sendTempMessage(channelId, `🔄 Config & alert rules reloaded.`, 5_000);
         log.info("Command: reloaded config and rules");

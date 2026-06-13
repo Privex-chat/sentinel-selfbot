@@ -6,6 +6,7 @@ import { getStmts } from "../database/queries";
 const log = createLogger("StatusPoller");
 
 let intervalHandle: NodeJS.Timeout | null = null;
+let firstPollTimeout: NodeJS.Timeout | null = null;
 let requestGuildMembersFn: ((guildId: string, userIds: string[]) => void) | null = null;
 let subscribePresenceFn:   ((guildId: string, memberIds: string[]) => void) | null = null;
 let selfbotGuildsFn: (() => any[]) | null = null;
@@ -153,7 +154,6 @@ function pollPresences(): void {
 }
 
 export function startStatusPoller(): void {
-    const interval = withJitter(config.statusPollIntervalMs);
     log.info(`Starting status poller (base interval: ${config.statusPollIntervalMs}ms, first poll: 90 s)`);
 
     // Delay the first poll to 90 s so that:
@@ -162,8 +162,8 @@ export function startStatusPoller(): void {
     //      (prevents double-flooding the gateway rate limit).
     const FIRST_POLL_DELAY_MS = 90_000;
 
-    let firstTimeout: NodeJS.Timeout | null = setTimeout(() => {
-        firstTimeout = null;
+    firstPollTimeout = setTimeout(() => {
+        firstPollTimeout = null;
         pollPresences();
         // Schedule recurring polls with per-tick jitter
         const scheduleNext = () => {
@@ -177,6 +177,10 @@ export function startStatusPoller(): void {
 }
 
 export function stopStatusPoller(): void {
+    if (firstPollTimeout) {
+        clearTimeout(firstPollTimeout);
+        firstPollTimeout = null;
+    }
     if (intervalHandle) {
         clearTimeout(intervalHandle);
         intervalHandle = null;

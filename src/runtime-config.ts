@@ -59,6 +59,35 @@ const NUMERIC_MIN: Partial<Record<RuntimeKey, number>> = {
     DAILY_SUMMARY_INTERVAL_MS:        300_000,   // 5 min
 };
 
+// Maps env key names → config object props + type parsers.
+// Declared above validateRuntimeValue so the validator's KEY_MAP reference
+// is resolved at definition time (avoids a temporal-dead-zone footgun if a
+// caller ever invokes the validator during module init).
+const KEY_MAP: Record<RuntimeKey, { prop: keyof typeof config; parse: (v: string) => any }> = {
+    DISCORD_TOKEN:                    { prop: "discordToken",              parse: v => v },
+    ALERT_WEBHOOK_URL:                { prop: "alertWebhookUrl",           parse: v => v },
+    CRITICAL_WEBHOOK_URL:             { prop: "criticalWebhookUrl",        parse: v => v },
+    AI_PROVIDER:                      { prop: "aiProvider",                parse: v => v },
+    AI_MODEL:                         { prop: "aiModel",                   parse: v => v },
+    AI_API_KEY:                       { prop: "aiApiKey",                  parse: v => v },
+    AI_BASE_URL:                      { prop: "aiBaseUrl",                 parse: v => v },
+    AI_ANALYSIS_INTERVAL_MS:          { prop: "aiAnalysisIntervalMs",      parse: v => parseInt(v, 10) },
+    AI_CATEGORIZATION_BATCH_SIZE:     { prop: "aiCategorizationBatchSize", parse: v => parseInt(v, 10) },
+    SUPABASE_URL:                     { prop: "supabaseUrl",               parse: v => v },
+    SUPABASE_SERVICE_KEY:             { prop: "supabaseServiceKey",        parse: v => v },
+    SUPABASE_SYNC_INTERVAL_MS:        { prop: "supabaseSyncIntervalMs",    parse: v => parseInt(v, 10) },
+    BACKFILL_ENABLED:                 { prop: "backfillEnabled",           parse: v => v !== "false" },
+    BACKFILL_MAX_DAYS:                { prop: "backfillMaxDays",           parse: v => parseInt(v, 10) },
+    BACKFILL_MAX_MESSAGES_PER_CHANNEL:{ prop: "backfillMaxMsgsPerChannel", parse: v => parseInt(v, 10) },
+    ALERT_DIGEST_MODE:                { prop: "alertDigestMode",           parse: v => v === "true" },
+    ALERT_DIGEST_INTERVAL_MS:         { prop: "alertDigestIntervalMs",     parse: v => parseInt(v, 10) },
+    ALERT_FATIGUE_THRESHOLD:          { prop: "alertFatigueThreshold",     parse: v => parseInt(v, 10) },
+    BRIEF_GENERATION_TIME:            { prop: "briefGenerationTime",       parse: v => v },
+    PROFILE_POLL_INTERVAL_MS:         { prop: "profilePollIntervalMs",     parse: v => parseInt(v, 10) },
+    STATUS_POLL_INTERVAL_MS:          { prop: "statusPollIntervalMs",      parse: v => parseInt(v, 10) },
+    DAILY_SUMMARY_INTERVAL_MS:        { prop: "dailySummaryIntervalMs",    parse: v => parseInt(v, 10) },
+};
+
 /**
  * Validate a runtime value before it is applied and persisted.
  * Returns an error message string on failure, or null on success.
@@ -93,32 +122,6 @@ function validateRuntimeValue(key: RuntimeKey, value: string): string | null {
 
     return null;
 }
-
-// Maps env key names → config object props + type parsers
-const KEY_MAP: Record<RuntimeKey, { prop: keyof typeof config; parse: (v: string) => any }> = {
-    DISCORD_TOKEN:                    { prop: "discordToken",              parse: v => v },
-    ALERT_WEBHOOK_URL:                { prop: "alertWebhookUrl",           parse: v => v },
-    CRITICAL_WEBHOOK_URL:             { prop: "criticalWebhookUrl",        parse: v => v },
-    AI_PROVIDER:                      { prop: "aiProvider",                parse: v => v },
-    AI_MODEL:                         { prop: "aiModel",                   parse: v => v },
-    AI_API_KEY:                       { prop: "aiApiKey",                  parse: v => v },
-    AI_BASE_URL:                      { prop: "aiBaseUrl",                 parse: v => v },
-    AI_ANALYSIS_INTERVAL_MS:          { prop: "aiAnalysisIntervalMs",      parse: v => parseInt(v, 10) },
-    AI_CATEGORIZATION_BATCH_SIZE:     { prop: "aiCategorizationBatchSize", parse: v => parseInt(v, 10) },
-    SUPABASE_URL:                     { prop: "supabaseUrl",               parse: v => v },
-    SUPABASE_SERVICE_KEY:             { prop: "supabaseServiceKey",        parse: v => v },
-    SUPABASE_SYNC_INTERVAL_MS:        { prop: "supabaseSyncIntervalMs",    parse: v => parseInt(v, 10) },
-    BACKFILL_ENABLED:                 { prop: "backfillEnabled",           parse: v => v !== "false" },
-    BACKFILL_MAX_DAYS:                { prop: "backfillMaxDays",           parse: v => parseInt(v, 10) },
-    BACKFILL_MAX_MESSAGES_PER_CHANNEL:{ prop: "backfillMaxMsgsPerChannel", parse: v => parseInt(v, 10) },
-    ALERT_DIGEST_MODE:                { prop: "alertDigestMode",           parse: v => v === "true" },
-    ALERT_DIGEST_INTERVAL_MS:         { prop: "alertDigestIntervalMs",     parse: v => parseInt(v, 10) },
-    ALERT_FATIGUE_THRESHOLD:          { prop: "alertFatigueThreshold",     parse: v => parseInt(v, 10) },
-    BRIEF_GENERATION_TIME:            { prop: "briefGenerationTime",       parse: v => v },
-    PROFILE_POLL_INTERVAL_MS:         { prop: "profilePollIntervalMs",     parse: v => parseInt(v, 10) },
-    STATUS_POLL_INTERVAL_MS:          { prop: "statusPollIntervalMs",      parse: v => parseInt(v, 10) },
-    DAILY_SUMMARY_INTERVAL_MS:        { prop: "dailySummaryIntervalMs",    parse: v => parseInt(v, 10) },
-};
 
 function applyToConfig(key: RuntimeKey, value: string): void {
     const entry = KEY_MAP[key];
@@ -190,4 +193,22 @@ export function onConfigChange(key: RuntimeKey, cb: ChangeCallback): void {
     const arr = changeListeners.get(key) ?? [];
     arr.push(cb);
     changeListeners.set(key, arr);
+}
+
+/**
+ * Re-fire every registered `onConfigChange` listener using the current in-memory
+ * value of each key. Intended for the `$reload` self-command which previously
+ * called `loadRuntimeConfig()` (which loads values but does *not* fire side-effect
+ * callbacks). Without this, $reload could not actually trigger a gateway
+ * reconnect, AI provider reset, brief reschedule, etc.
+ */
+export function triggerAllConfigListeners(): void {
+    for (const [key, listeners] of changeListeners) {
+        if (!listeners.length) continue;
+        const value = getConfigValue(key);
+        for (const cb of listeners) {
+            try { cb(key, value); }
+            catch (err: any) { log.error(`onChange callback error for ${key} during reload: ${err.message}`); }
+        }
+    }
 }

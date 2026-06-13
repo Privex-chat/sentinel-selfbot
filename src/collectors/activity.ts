@@ -46,6 +46,12 @@ export function handleActivityUpdate(targetId: string, activities: any[]): void 
     const oldKeys = new Set(oldActivities.map(a => activityKey(a)));
     const newKeys = new Set(newActivities.map((a: any) => activityKey(a)));
 
+    // Capture the dbSessionId for every freshly-opened activity so the
+    // updated-tracked rebuild below doesn't have to scan getOpenActivitySessions
+    // per item. Without this every PRESENCE_UPDATE that changed activities
+    // re-queried the entire open-sessions table once per activity.
+    const newSessionIds = new Map<string, number>();
+
     // Detect new activities
     for (const activity of newActivities) {
         const key = activityKey(activity);
@@ -61,6 +67,7 @@ export function handleActivityUpdate(targetId: string, activities: any[]): void 
                 now,
                 metadata
             );
+            newSessionIds.set(key, Number(result.lastInsertRowid));
 
             const eventData = JSON.stringify({
                 name: activity.name,
@@ -134,18 +141,24 @@ export function handleActivityUpdate(targetId: string, activities: any[]): void 
         }
     }
 
-    // Detect ended activities
+    // Detect ended activities. Lazily load open sessions only if any old activity
+    // lacks a cached dbSessionId — common case is "all cached" → zero DB scans.
+    let openSessionsByKey: Map<string, number> | null = null;
+    const loadOpenSessionsByKey = (): Map<string, number> => {
+        if (openSessionsByKey) return openSessionsByKey;
+        const rows = stmts.getOpenActivitySessions.all(targetId) as any[];
+        openSessionsByKey = new Map(
+            rows.map((s: any) => [`${s.activity_type}:${s.activity_name}`, s.id])
+        );
+        return openSessionsByKey;
+    };
+
     for (const activity of oldActivities) {
         const key = activityKey(activity);
         if (!newKeys.has(key)) {
-            if (activity.dbSessionId) {
-                stmts.closeActivitySession.run(now, now, activity.dbSessionId);
-            } else {
-                const openSessions = stmts.getOpenActivitySessions.all(targetId) as any[];
-                const match = openSessions.find((s: any) => s.activity_name === activity.name && s.activity_type === activity.type);
-                if (match) {
-                    stmts.closeActivitySession.run(now, now, match.id);
-                }
+            const sessionId = activity.dbSessionId ?? loadOpenSessionsByKey().get(key);
+            if (sessionId) {
+                stmts.closeActivitySession.run(now, now, sessionId);
             }
 
             const eventData = JSON.stringify({
@@ -175,7 +188,10 @@ export function handleActivityUpdate(targetId: string, activities: any[]): void 
         }
     }
 
-    // Update tracked state
+    // Update tracked state. Resolution order for dbSessionId:
+    //   1. Just-inserted session id from the "Detect new activities" loop.
+    //   2. Existing TrackedActivity carried over from the previous tick.
+    //   3. One-shot lookup of currently-open sessions (lazy, scanned at most once).
     const oldByKey = new Map(oldActivities.map(a => [activityKey(a), a]));
     const updatedTracked: TrackedActivity[] = newActivities.map((a: any) => {
         const key = activityKey(a);
@@ -183,15 +199,16 @@ export function handleActivityUpdate(targetId: string, activities: any[]): void 
         if (existing?.dbSessionId) {
             return { ...existing, details: a.details, state: a.state };
         }
-        const openSessions = stmts.getOpenActivitySessions.all(targetId) as any[];
-        const match = openSessions.find((s: any) => s.activity_name === a.name && s.activity_type === a.type);
+        const dbSessionId =
+            newSessionIds.get(key) ??
+            loadOpenSessionsByKey().get(key);
         return {
             name: a.name,
             type: a.type,
             applicationId: a.application_id,
             details: a.details,
             state: a.state,
-            dbSessionId: match?.id,
+            dbSessionId,
         };
     });
 

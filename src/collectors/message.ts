@@ -82,6 +82,11 @@ export function handleMessageCreate(targetId: string, message: any, guildId: str
 export function handleMessageUpdate(targetId: string, message: any, guildId: string | null): void {
     const stmts = getStmts();
     const now = Date.now();
+    // Prefer Discord's authoritative edited_timestamp when present; fall back to
+    // now only when the payload omits it (rare — usually only synthetic updates).
+    const editedAt = message.edited_timestamp
+        ? new Date(message.edited_timestamp).getTime()
+        : now;
 
     const existing = stmts.getMessage.get(message.id) as any;
     if (!existing) return;
@@ -100,7 +105,7 @@ export function handleMessageUpdate(targetId: string, message: any, guildId: str
     stmts.updateMessageEdited.run(
         newContent,
         newContent.length,
-        now,
+        editedAt,
         JSON.stringify(editHistory),
         message.id
     );
@@ -112,7 +117,7 @@ export function handleMessageUpdate(targetId: string, message: any, guildId: str
         newContentLength: newContent.length,
         editCount: editHistory.length,
     });
-    stmts.insertEvent.run(targetId, "MESSAGE_UPDATE", now, eventData, guildId, message.channel_id || existing.channel_id);
+    stmts.insertEvent.run(targetId, "MESSAGE_UPDATE", editedAt, eventData, guildId, message.channel_id || existing.channel_id);
 
     log.debug(`${targetId}: edited message ${message.id} (edit #${editHistory.length})`);
 }

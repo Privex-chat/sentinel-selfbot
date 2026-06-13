@@ -39,7 +39,7 @@ import { initSupabaseSync, SupabaseSyncEngine } from "./database/supabase-sync";
 import { runAISocialGraphAnalysis } from "./analyzers/social-graph-ai";
 import { runAllCategorization } from "./categorization/categorizer";
 import { runAllBaselineComputation } from "./analyzers/baseline";
-import { scheduleBriefGeneration } from "./briefs/brief-generator";
+import { scheduleBriefGeneration, cancelBriefGeneration } from "./briefs/brief-generator";
 import { startBackfillOnStartup } from "./backfill/backfill-engine";
 import { startDigestFlusher } from "./alerts/digest";
 import { notifyStartup, notifyCriticalError } from "./utils/webhook-notifier";
@@ -547,7 +547,7 @@ function shutdown(): void {
     if (heartbeatInterval)           clearInterval(heartbeatInterval);
     if (aiAnalysisInterval)          clearInterval(aiAnalysisInterval);
     if (digestHandle)                clearInterval(digestHandle);
-    if (briefHandle)                 clearTimeout(briefHandle);
+    cancelBriefGeneration();
     if (presenceSubscriptionInterval) clearInterval(presenceSubscriptionInterval);
 
     stopProfilePoller();
@@ -721,7 +721,11 @@ async function main(): Promise<void> {
     }
 
     onConfigChange("BRIEF_GENERATION_TIME", () => {
-        if (briefHandle) clearTimeout(briefHandle);
+        // Cancel the *entire* timeout chain, not just the first arm. The old
+        // implementation only cleared the outer handle and the inner re-arm
+        // kept firing, duplicating daily briefs (and AI cost) after every
+        // reschedule.
+        cancelBriefGeneration();
         briefHandle = scheduleBriefGeneration();
         log.info("Brief generation rescheduled");
     });

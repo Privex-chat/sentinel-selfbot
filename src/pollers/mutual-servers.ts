@@ -8,6 +8,7 @@ import { pushSSEEvent } from "../api/routes/events";
 const log = createLogger("MutualServers");
 
 let intervalHandle: NodeJS.Timeout | null = null;
+let firstPollTimeout: NodeJS.Timeout | null = null;
 const POLL_INTERVAL_BASE = 1_800_000; // 30 minutes
 
 const lastKnownGuildIds = new Map<string, Set<string>>();
@@ -96,13 +97,18 @@ export function startMutualServersPoller(): void {
         }, withJitter(POLL_INTERVAL_BASE));
     };
 
-    setTimeout(async () => {
+    firstPollTimeout = setTimeout(async () => {
+        firstPollTimeout = null;
         await pollAllTargets();
         scheduleNext();
     }, withJitter(60_000));
 }
 
 export function stopMutualServersPoller(): void {
+    if (firstPollTimeout) {
+        clearTimeout(firstPollTimeout);
+        firstPollTimeout = null;
+    }
     if (intervalHandle) {
         clearTimeout(intervalHandle);
         intervalHandle = null;
