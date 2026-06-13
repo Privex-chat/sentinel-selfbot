@@ -1,27 +1,6 @@
-export const GatewayIntents = {
-    GUILDS: 1 << 0,
-    GUILD_MEMBERS: 1 << 1,
-    GUILD_VOICE_STATES: 1 << 7,
-    GUILD_PRESENCES: 1 << 8,
-    GUILD_MESSAGES: 1 << 9,
-    GUILD_MESSAGE_REACTIONS: 1 << 10,
-    GUILD_MESSAGE_TYPING: 1 << 11,
-    DIRECT_MESSAGES: 1 << 12,
-    DIRECT_MESSAGE_TYPING: 1 << 14,
-    MESSAGE_CONTENT: 1 << 15,
-} as const;
-
-export const ALL_INTENTS =
-    GatewayIntents.GUILDS |
-    GatewayIntents.GUILD_MEMBERS |
-    GatewayIntents.GUILD_VOICE_STATES |
-    GatewayIntents.GUILD_PRESENCES |
-    GatewayIntents.GUILD_MESSAGES |
-    GatewayIntents.GUILD_MESSAGE_REACTIONS |
-    GatewayIntents.GUILD_MESSAGE_TYPING |
-    GatewayIntents.DIRECT_MESSAGES |
-    GatewayIntents.DIRECT_MESSAGE_TYPING |
-    GatewayIntents.MESSAGE_CONTENT;
+// Selfbots IDENTIFY with `capabilities`, not `intents` (intents are bot-only).
+// The intent bitmask constants previously exported here were unused and have
+// been removed. See gateway/client.ts:identify() for the capabilities value.
 
 export enum GatewayOpcodes {
     DISPATCH = 0,

@@ -15,7 +15,6 @@
     "dotenv": "^16.4.7",
     "express": "^5.2.1",
     "fastify": "^5.2.1",
-    "node-fetch": "^3.3.2",
     "ws": "^8.18.0"
   },
   "devDependencies": {

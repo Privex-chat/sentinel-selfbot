@@ -1,5 +1,4 @@
 import { createLogger } from "../utils/logger";
-import { getStmts } from "../database/queries";
 import { config } from "../utils/config";
 import { pushSSEEvent } from "../api/routes/events";
 import { enqueueWebhook } from "../utils/webhook-queue";
@@ -70,7 +69,6 @@ export function addToDigest(
 function flushDigest(): void {
     if (!digestBuffer.size) return;
 
-    const stmts = getStmts();
     const now = Date.now();
     const allEntries: DigestEntry[] = [];
 

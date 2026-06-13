@@ -55,12 +55,9 @@ function prepareStatements() {
         insertPresenceSession: db.prepare(
             "INSERT INTO presence_sessions (target_id, status, platform, start_time) VALUES (?, ?, ?, ?)"
         ),
-        closePresenceSession: db.prepare(
-            "UPDATE presence_sessions SET end_time = ?, duration_ms = ? - start_time WHERE id = ?"
-        ),
         // Closes ALL open presence sessions for a target in one statement.
-        // Preferred over getOpenPresenceSession + closePresenceSession (which only
-        // closes one row and silently leaves orphaned sessions if duplicates exist).
+        // The single-row close helper was removed because it could leave
+        // orphaned sessions if duplicates ever existed.
         closeAllOpenPresenceSessions: db.prepare(
             "UPDATE presence_sessions SET end_time = ?, duration_ms = ? - start_time WHERE target_id = ? AND end_time IS NULL"
         ),
