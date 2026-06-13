@@ -38,6 +38,7 @@ Add a user ID. From that moment, the selfbot records everything it can observe:
 - 👻 **Ghost typing** — started typing but never sent
 - 🖼️ **Profile changes** — username, display name, avatar, bio, connected accounts (Twitter, Steam, etc.)
 - 🔔 **Platform switches** — detects when a target moves from desktop to mobile mid-session
+- 🌐 **Per-target timezone** — every hour/day-of-week analyser (sleep schedule, routine heatmap, behavioral baselines, `UNUSUAL_HOUR`/`COMES_ONLINE after_hour` alerts) runs in the target's own IANA timezone, not the host server's. Set with `$tz <@user> Area/City`.
 - 🖥️ **Self-commands** — manage tracking from any Discord channel with instant trace deletion
 
 **AI-powered intelligence (optional):**
@@ -79,7 +80,8 @@ Type commands in any Discord channel (including your own private servers). The t
 | `$pause <@user>` | Suspend tracking without deleting history |
 | `$resume <@user>` | Re-activate a paused target |
 | `$label <@user> <text>` | Set a display label for a target |
-| `$note <@user> <text>` | Append a timestamped note to a target |
+| `$note <@user> <text>` | Append a timestamped note to a target (capped at 4000 chars cumulative) |
+| `$tz <@user> [Area/City]` | Set the target's IANA timezone (defaults to UTC). Omit the argument to show current. |
 | `$status <@user>` | Current presence, platform & activities |
 | `$seen <@user>` | When the target was last online |
 | `$uptime <@user>` | Today's total active time with progress bar |
@@ -129,9 +131,10 @@ When you add a target, Sentinel walks backwards through every shared channel to 
 ### 🔔 Alert System
 
 - **14 alert types** — comes online, goes offline, starts activity, joins voice, sends message, ghost types, profile change, unusual hour, new game, keyword mention, and more
-- **Digest mode** — batch alerts into a single notification every N minutes
+- **Per-target timezone-aware** — `UNUSUAL_HOUR` and `COMES_ONLINE after_hour` match against each target's own clock, not the host server's
+- **Digest mode** — batch alerts into a single SSE event every N minutes for the dashboard live feed (immediate webhook delivery is unaffected, no double-fire)
 - **Fatigue detection** — auto-suppress rules that fire too often (configurable threshold)
-- **Composite conditions** — combine multiple conditions in one rule
+- **Composite conditions** — combine multiple conditions in one rule; rule type + composite shape are validated server-side at create time (bad input returns HTTP 400)
 - **Discord webhooks** — normal alerts and critical system errors routed to separate channels
 
 ---
@@ -190,6 +193,19 @@ LOG_LEVEL=info
 # Recommended for Railway / cloud deployments.
 RANDOM_JITTER=false
 
+# ── API hardening (requires restart) ─────────────────────────────────────────
+# Comma-separated CORS allowlist. "*" reflects any origin (use only if you
+# front the API yourself with another auth layer). Unset = default allowlist
+# (hosted Vercel panel + localhost dev ports).
+API_CORS_ORIGINS=https://sentinel-panel.vercel.app,http://localhost:3000,http://localhost:5173
+
+# 32-byte (base64) AES-256-GCM key for at-rest encryption of sensitive
+# runtime_config values (Discord token, AI key, Supabase service key, webhook
+# URLs). Strongly recommended in DB_MODE=local+cloud and DB_MODE=cloud — without
+# it those values are written to Supabase in plaintext.
+# Generate: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+SENTINEL_DATA_KEY=
+
 # ── Database mode (requires restart) ─────────────────────────────────────────
 # local       — SQLite only. Default.
 # local+cloud — SQLite live DB + async Supabase mirror.
@@ -234,6 +250,23 @@ BRIEF_GENERATION_TIME=07:00  # UTC — requires AI_PROVIDER != none
 </details>
 
 OPSEC tip: Set `RANDOM_JITTER=true` to make your polling patterns and gateway fingerprint less predictable.
+
+---
+
+## 🛰️ API Behaviour at a Glance
+
+| Concern | Default |
+|---|---|
+| Authentication | Bearer `API_AUTH_TOKEN` on every `/api/*` route (constant-time compare). |
+| CORS | Allowlist via `API_CORS_ORIGINS`; defaults to hosted panel + `localhost`. `*` opts into reflect-any. |
+| Rate limiting | 300 req/min/IP via `@fastify/rate-limit`. `/health` is allowlisted. 429s carry `Retry-After`. |
+| Liveness probe | Unauthenticated `GET /health` → `{ status, uptimeMs, gatewayConnected }`. |
+| Error responses | Unhandled errors return `{ error: "Internal server error", requestId }`. Full detail (with stack) lives in logs keyed by the same id. Schema-validation errors surface as 400 with safe `details`. |
+| Full export | `GET /api/export/:userId` streams **NDJSON** (`application/x-ndjson`) — one row per line, section markers framed by `_section`. CSV path (`/csv`) streams row-by-row too. |
+| SSE replay | `GET /api/events/stream?since=<lastEventId>` replays missed events from the 500-entry in-memory buffer. |
+| Search escape | `?search=` query is escaped against LIKE wildcards — `%` and `_` from the client are literal text. |
+
+---
 
 ---
 
