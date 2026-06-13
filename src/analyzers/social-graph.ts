@@ -5,6 +5,29 @@ import { getTargetConfig } from "./baseline";
 
 const log = createLogger("SocialGraph");
 
+// ── Result cache ─────────────────────────────────────────────────────────────
+//
+// buildSocialGraph runs three multi-thousand-row scans (messages, reactions,
+// voice). It's hit synchronously by the analytics API, the relationships API,
+// AND the AI social-graph analyzer. Three back-to-back invocations with the
+// same args are common from the dashboard. Cache for a short window so the
+// rebuild isn't paid per-request.
+const CACHE_TTL_MS = 5 * 60_000;
+const graphCache: Map<string, { computedAt: number; data: SocialGraphData }> = new Map();
+
+function cacheKey(targetId: string, days: number): string {
+    return `${targetId}:${days}`;
+}
+
+/** Drop every cached graph for this target (used when target data changes meaningfully). */
+export function invalidateSocialGraphCache(targetId?: string): void {
+    if (!targetId) { graphCache.clear(); return; }
+    const prefix = `${targetId}:`;
+    for (const key of graphCache.keys()) {
+        if (key.startsWith(prefix)) graphCache.delete(key);
+    }
+}
+
 export interface SocialConnection {
     userId: string;
     score: number;
@@ -21,6 +44,15 @@ export interface SocialGraphData {
 }
 
 export function buildSocialGraph(targetId: string, days: number = 30): SocialGraphData {
+    // Serve from cache when warm. The cache is 5 minutes so dashboard
+    // hits land on the cached result; AI analysis (single run per 24h)
+    // pays the full cost on first invocation.
+    const ck = cacheKey(targetId, days);
+    const cached = graphCache.get(ck);
+    if (cached && Date.now() - cached.computedAt < CACHE_TTL_MS) {
+        return cached.data;
+    }
+
     const stmts = getStmts();
     const cfg = getTargetConfig(targetId);
     const since = Date.now() - days * 86400000;
@@ -123,8 +155,10 @@ export function buildSocialGraph(targetId: string, days: number = 30): SocialGra
         }
     }
 
-    return {
+    const result: SocialGraphData = {
         connections: connections.slice(0, 50),
         totalInteractions: connections.reduce((sum, c) => sum + c.messageInteractions + c.reactionInteractions, 0),
     };
+    graphCache.set(ck, { computedAt: Date.now(), data: result });
+    return result;
 }

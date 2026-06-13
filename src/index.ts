@@ -45,6 +45,7 @@ import { startDigestFlusher } from "./alerts/digest";
 import { notifyStartup, notifyCriticalError } from "./utils/webhook-notifier";
 import { loadRuntimeConfig, onConfigChange } from "./runtime-config";
 import { resetAIProvider } from "./ai/provider";
+import { isTargetCached, refreshTargetCache } from "./target-lifecycle";
 
 const log = createLogger("Sentinel");
 
@@ -61,11 +62,10 @@ let aiAnalysisInterval:       NodeJS.Timeout | null      = null;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function isTarget(userId: string): boolean {
-    const stmts  = getStmts();
-    const target = stmts.getTarget.get(userId) as any;
-    return target?.active === 1;
-}
+// Active-target gate for the gateway dispatch handler. Backed by an in-memory
+// Set refreshed on every mutation site — avoids hitting SQLite once per event
+// per active rule. See target-lifecycle.ts for the cache + refresh policy.
+const isTarget = isTargetCached;
 
 function startHeartbeatLogger(): void {
     const INTERVAL = 60_000;
@@ -609,6 +609,9 @@ async function main(): Promise<void> {
 
     closeStaleOpenSessions();
     reloadRules();
+    // Prime the active-target cache after any hydration / stale-session sweep
+    // so the gateway dispatch handler is correct from the very first event.
+    refreshTargetCache();
 
     setAlertCallback((alert) => {
         pushSSEEvent({

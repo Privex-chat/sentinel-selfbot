@@ -15,6 +15,7 @@
  */
 
 import { createLogger } from "./utils/logger";
+import { getStmts } from "./database/queries";
 import { removeTargetState as removeFromPresence } from "./collectors/presence";
 import { removeTargetState as removeFromActivity } from "./collectors/activity";
 import { removeTargetState as removeFromVoice } from "./collectors/voice";
@@ -23,8 +24,46 @@ import { removeTargetState as removeFromGuildMember } from "./collectors/guild-m
 import { removeTargetState as removeFromMutualServers } from "./pollers/mutual-servers";
 import { removeTargetState as removeFromConnectedAccounts } from "./pollers/connected-accounts";
 import { removeTargetState as removeFromAlertEngine } from "./alerts/engine";
+import { invalidateSocialGraphCache } from "./analyzers/social-graph";
 
 const log = createLogger("TargetLifecycle");
+
+// ── Active-target cache ──────────────────────────────────────────────────────
+//
+// The gateway dispatch handler calls `isTarget(userId)` on every PRESENCE_UPDATE
+// / MESSAGE_CREATE / VOICE_STATE_UPDATE / TYPING_START / etc. The previous
+// implementation hit SQLite (`getTarget.get`) per event. better-sqlite3 is fast
+// but on a busy guild that's still hundreds of synchronous queries per second
+// blocking the event loop. The cache lets the hot path be a Set lookup; the
+// cost is having to refresh after every target mutation (add / pause / resume /
+// remove), which is rare.
+//
+// Refresh policy: every mutation site below calls `refreshTargetCache()` after
+// the SQL change commits. Worst case if a site forgets: a one-event-cycle stale
+// read until the next refresh — non-fatal, just temporarily wrong.
+
+const activeTargetSet = new Set<string>();
+
+export function refreshTargetCache(): void {
+    try {
+        const rows = getStmts().getActiveTargets.all() as Array<{ user_id: string }>;
+        activeTargetSet.clear();
+        for (const row of rows) activeTargetSet.add(row.user_id);
+        log.debug(`Target cache refreshed (${activeTargetSet.size} active)`);
+    } catch (err: any) {
+        log.warn(`Target cache refresh failed: ${err.message}`);
+    }
+}
+
+export function isTargetCached(userId: string): boolean {
+    return activeTargetSet.has(userId);
+}
+
+export function getActiveTargetCount(): number {
+    return activeTargetSet.size;
+}
+
+// ── Lifecycle cleanup ────────────────────────────────────────────────────────
 
 export function onTargetRemoved(userId: string): void {
     try { removeFromPresence(userId); }          catch (err: any) { log.warn(`presence cleanup: ${err.message}`); }
@@ -35,5 +74,10 @@ export function onTargetRemoved(userId: string): void {
     try { removeFromMutualServers(userId); }     catch (err: any) { log.warn(`mutual-servers cleanup: ${err.message}`); }
     try { removeFromConnectedAccounts(userId); } catch (err: any) { log.warn(`connected-accounts cleanup: ${err.message}`); }
     try { removeFromAlertEngine(userId); }       catch (err: any) { log.warn(`alert-engine cleanup: ${err.message}`); }
+    try { invalidateSocialGraphCache(userId); }  catch (err: any) { log.warn(`social-graph cache cleanup: ${err.message}`); }
+    // Drop from the active-target cache too — caller already removed the SQL
+    // row, but we don't refresh from the DB here to avoid an extra round-trip
+    // when several deletes land in close succession.
+    activeTargetSet.delete(userId);
     log.debug(`In-memory state cleared for target ${userId}`);
 }

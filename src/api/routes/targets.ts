@@ -4,7 +4,7 @@ import { getDb } from "../../database/connection";
 import { config } from "../../utils/config";
 import { startBackfillForTarget } from "../../backfill/backfill-engine";
 import { requestPresenceForUser } from "../../pollers/status-poller";
-import { onTargetRemoved } from "../../target-lifecycle";
+import { onTargetRemoved, refreshTargetCache } from "../../target-lifecycle";
 
 // How long to wait after adding a target before kicking off the backfill.
 // Adding a target already triggers a profile fetch for mutual guilds — doing
@@ -50,6 +50,7 @@ export function registerTargetRoutes(app: FastifyInstance): void {
         }
         const stmts = getStmts();
         stmts.insertTarget.run(userId, Date.now(), label || null, notes || null, priorityVal, 1);
+        refreshTargetCache();
 
         if (config.backfillEnabled) {
             // Delay the backfill start so the profile fetch triggered by the
@@ -115,6 +116,9 @@ export function registerTargetRoutes(app: FastifyInstance): void {
         if (setParts.length > 0) {
             params.push(userId);
             db.prepare(`UPDATE targets SET ${setParts.join(", ")} WHERE user_id = ?`).run(...params);
+            // Refresh only when `active` could have changed — that's the only
+            // column that controls cache membership.
+            if ("active" in body) refreshTargetCache();
         }
 
         return { success: true };

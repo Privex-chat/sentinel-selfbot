@@ -37,7 +37,7 @@ import { getCurrentPresence } from "../collectors/presence";
 import { getCurrentActivities } from "../collectors/activity";
 import { reloadRules } from "../alerts/engine";
 import { loadRuntimeConfig, triggerAllConfigListeners } from "../runtime-config";
-import { onTargetRemoved } from "../target-lifecycle";
+import { onTargetRemoved, refreshTargetCache } from "../target-lifecycle";
 import type { GatewayClient } from "../gateway/client";
 
 const log = createLogger("Commands");
@@ -162,6 +162,7 @@ async function cmdAdd(channelId: string, args: string[]): Promise<void> {
             await sendTempMessage(channelId, `ℹ️ \`${userId}\` is already an active target.`);
         } else {
             db.prepare("UPDATE targets SET active = 1 WHERE user_id = ?").run(userId);
+            refreshTargetCache();
             setTimeout(() => requestPresenceForUser(userId), 5_000);
             await sendTempMessage(channelId, `✅ Target \`${userId}\` re-activated.`);
             log.info(`Command: re-activated target ${userId}`);
@@ -185,6 +186,7 @@ async function cmdAdd(channelId: string, args: string[]): Promise<void> {
     }
 
     getStmts().insertTarget.run(userId, Date.now(), null, null, 0, 1);
+    refreshTargetCache();
     setTimeout(() => requestPresenceForUser(userId), 5_000);
     if (config.backfillEnabled) startBackfillForTarget(userId).catch(() => {});
 
@@ -232,6 +234,7 @@ async function cmdPause(channelId: string, args: string[]): Promise<void> {
     }
 
     getDb().prepare("UPDATE targets SET active = 0 WHERE user_id = ?").run(userId);
+    refreshTargetCache();
     await sendTempMessage(channelId, `⏸ Target \`${userId}\` paused. History preserved. Use \`$resume\` to re-activate.`);
     log.info(`Command: paused target ${userId}`);
 }
@@ -255,6 +258,7 @@ async function cmdResume(channelId: string, args: string[]): Promise<void> {
     }
 
     getDb().prepare("UPDATE targets SET active = 1 WHERE user_id = ?").run(userId);
+    refreshTargetCache();
     setTimeout(() => requestPresenceForUser(userId), 5_000);
     await sendTempMessage(channelId, `▶️ Target \`${userId}\` resumed. Presence subscription in 5 s.`);
     log.info(`Command: resumed target ${userId}`);

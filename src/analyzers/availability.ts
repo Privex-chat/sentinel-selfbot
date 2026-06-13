@@ -67,15 +67,21 @@ function create7x24(): number[][] {
 }
 
 function fillTimeRange(matrix: number[][], startMs: number, endMs: number): void {
-    const start = new Date(startMs);
-    const end = new Date(endMs);
+    if (endMs <= startMs) return;
 
-    let current = new Date(start);
-    while (current < end) {
+    // Snap to the top of the hour containing `startMs` so a session that begins
+    // at 14:23 still credits the 14:00 bucket (and not just 15, 16, …).
+    // Previously the loop began at the exact session start, missing the
+    // partial-overlap hour entirely.
+    const start = new Date(startMs);
+    start.setMinutes(0, 0, 0);
+
+    let current = start;
+    while (current.getTime() < endMs) {
         const dow = current.getDay();
         const hour = current.getHours();
         matrix[dow][hour]++;
-        current = new Date(current.getTime() + 3600000); // advance 1 hour
+        current = new Date(current.getTime() + 3600000);
     }
 }
 

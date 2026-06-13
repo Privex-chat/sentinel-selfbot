@@ -40,12 +40,28 @@ export function detectCorrelations(
     const totalEvents = events.length;
     const correlations: EventCorrelation[] = [];
 
-    // Group events by type for fast lookup
-    const byType = new Map<string, { timestamp: number }[]>();
+    // Group events by type, then sort each bucket ascending by timestamp so we
+    // can binary-search the window boundary instead of linearly scanning every
+    // pair. Previous implementation was O(|A| × |B|) per pair × |types|² pairs.
+    // On a 50 000-event window with 20 distinct types that's billions of
+    // comparisons; binary search collapses it to O((|A| log |B|) per pair).
+    const byType = new Map<string, number[]>();
     for (const e of events) {
         const arr = byType.get(e.event_type) || [];
-        arr.push({ timestamp: e.timestamp });
+        arr.push(e.timestamp);
         byType.set(e.event_type, arr);
+    }
+    for (const arr of byType.values()) arr.sort((a, b) => a - b);
+
+    // Lower bound: index of the first element with timestamp > `from`.
+    function firstAfter(sorted: number[], from: number): number {
+        let lo = 0, hi = sorted.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >>> 1;
+            if (sorted[mid] <= from) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
     }
 
     // Check all pairs (A, B) where A ≠ B
@@ -63,17 +79,14 @@ export function detectCorrelations(
             let occurrences = 0;
             const delays: number[] = [];
 
-            // For each A, count B occurrences within windowMs after
-            for (const eA of eventsA) {
-                const afterA = eA.timestamp;
+            // For each A, find the first B strictly after A via binary search,
+            // then walk forward only while the timestamp is within the window.
+            for (const afterA of eventsA) {
                 const beforeB = afterA + windowMs;
-                const matching = eventsB.filter(
-                    eB => eB.timestamp > afterA && eB.timestamp <= beforeB
-                );
-                if (matching.length > 0) {
+                const startIdx = firstAfter(eventsB, afterA);
+                if (startIdx < eventsB.length && eventsB[startIdx] <= beforeB) {
                     occurrences++;
-                    // Record delay to first matching B
-                    delays.push(matching[0].timestamp - afterA);
+                    delays.push(eventsB[startIdx] - afterA);
                 }
             }
 

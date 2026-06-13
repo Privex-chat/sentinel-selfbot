@@ -73,8 +73,12 @@ export function analyzeSleepSchedule(targetId: string, days: number = 14): Sleep
     }
 
     const irregularities: string[] = [];
-    const medianBed = median(bedtimes);
-    const medianWake = median(wakeTimes);
+    // Use a wrap-aware median for time-of-day values. The naive median collapses
+    // for users whose bedtimes straddle midnight (e.g. 23:30 + 01:00 → median ≈
+    // 12:15, which is nonsense). circularMedianHours detects the wrap and shifts
+    // the pre-noon values into a continuous post-midnight range before sorting.
+    const medianBed = circularMedianHours(bedtimes);
+    const medianWake = circularMedianHours(wakeTimes);
 
     // Detect all-nighters (went to sleep after 5am)
     for (const s of sleepSessions) {
@@ -105,6 +109,25 @@ function median(arr: number[]): number {
     const sorted = [...arr].sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
     return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * Median of hour-of-day values that may wrap across midnight.
+ *
+ * If the min/max span is ≤12 hours the values don't cross midnight and the
+ * plain median is correct. Otherwise the cluster spans midnight: shift values
+ * < 12 to their post-midnight twin (h + 24), take the median in the unwrapped
+ * space, then wrap back into [0, 24).
+ */
+function circularMedianHours(hours: number[]): number {
+    if (hours.length === 0) return 0;
+    const sorted = [...hours].sort((a, b) => a - b);
+    if (sorted[sorted.length - 1] - sorted[0] <= 12) {
+        return median(sorted);
+    }
+    const shifted = sorted.map(h => h < 12 ? h + 24 : h).sort((a, b) => a - b);
+    const m = median(shifted);
+    return m >= 24 ? m - 24 : m;
 }
 
 function formatHour(h: number): string {
