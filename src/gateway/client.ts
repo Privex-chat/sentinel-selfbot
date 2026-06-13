@@ -10,7 +10,13 @@ import { getIdentifyProperties } from "../utils/discord-properties";
 
 const log = createLogger("Gateway");
 const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
-const GATEWAY_RATE_LIMIT = 120;
+// Discord's hard ceiling is 120 commands per 60 s. Real user clients almost
+// never approach that; sitting near it is itself an automation signal. We
+// enforce a soft cap of 40 ops / 60 s and let the in-flight queue stretch
+// requests over time instead of bursting close to the official limit.
+// Reconnect storms, REQUEST_GUILD_MEMBERS staggers, and op-14 subscriptions
+// were the main paths that previously pushed near the hard cap.
+const GATEWAY_RATE_LIMIT = 40;
 const GATEWAY_RATE_PERIOD = 60_000;
 
 // Browser profile and identify properties are defined in utils/discord-properties.ts

@@ -107,16 +107,30 @@ function fmtDateTime(ms: number): string {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${fmtTime(ms)}`;
 }
 
-/** Delete a Discord message. Swallows errors (message may already be gone). */
+/**
+ * Delete a Discord message. Failures are surfaced at WARN level: a self-command
+ * that we couldn't delete is the path the README's "no trace remains" promise
+ * relies on. If this fires repeatedly the operator should know — likely token
+ * issue, missing channel permission, or a 4xx that hints at account-flag risk.
+ * The previous DEBUG level meant these silently passed at default LOG_LEVEL=info.
+ */
 async function deleteMessage(channelId: string, messageId: string): Promise<void> {
     try {
-        await discordFetch(
+        const res = await discordFetch(
             `/channels/${channelId}/messages/${messageId}`,
             config.discordToken,
             { method: "DELETE" }
         );
+        if (!res.ok && res.status !== 404) {
+            // 404 is fine — message was already gone (e.g. user deleted it
+            // manually faster than the command pipeline).
+            log.warn(
+                `deleteMessage: HTTP ${res.status} on channel ${channelId} message ${messageId}. ` +
+                `Command may have left a visible trace.`
+            );
+        }
     } catch (e: any) {
-        log.debug(`deleteMessage failed: ${e.message}`);
+        log.warn(`deleteMessage threw on channel ${channelId} message ${messageId}: ${e.message}`);
     }
 }
 

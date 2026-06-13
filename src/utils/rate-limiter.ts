@@ -9,8 +9,10 @@ let discordAuthFailedNotified = false;
 // Minimum wall-clock gap between any two outbound Discord REST requests.
 // This acts as a safety floor independent of bucket state — even if buckets
 // say we have remaining capacity, firing back-to-back requests at full speed
-// looks like automation to Discord's abuse detection. 400 ms ± 30% jitter.
-const MIN_REQUEST_INTERVAL_MS = 400;
+// looks like automation to Discord's abuse detection. 600 ms ± 30% jitter
+// keeps sustained REST throughput well under what an attentive human could
+// produce by hand while still letting interactive commands feel responsive.
+const MIN_REQUEST_INTERVAL_MS = 600;
 
 // Extra safety buffer added on top of Discord's retry_after value.
 // We wait retry_after × (1 + RETRY_AFTER_BUFFER) so we don't immediately

@@ -10,8 +10,12 @@ import { handleProfileUpdate } from "../collectors/profile";
 const log = createLogger("BackfillEngine");
 
 // How long to wait between fetching pages of 100 messages within a single channel.
-// High enough that it doesn't look like automated scraping. Jitter applied on top.
-const BACKFILL_PAGE_DELAY_MS = 2_500;
+// High enough that the sustained-throughput signature does not look like an
+// automated scraper. Jitter (±30 %) is layered on top. Previously 2 500 ms but
+// raised to 5 000 ms because backfill is the longest-lived sustained-request
+// path in the bot — Discord's abuse heuristics weight sustained throughput
+// heavily, so the floor is the lever that matters most here.
+const BACKFILL_PAGE_DELAY_MS = 5_000;
 
 // How long to wait after finishing one channel before starting the next one
 // within the same guild. Gives Discord's abuse detection nothing to latch onto.
