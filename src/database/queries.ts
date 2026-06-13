@@ -15,6 +15,19 @@ function prepareStatements() {
         getTarget: db.prepare("SELECT * FROM targets WHERE user_id = ?"),
         getAllTargets: db.prepare("SELECT * FROM targets"),
         getActiveTargets: db.prepare("SELECT * FROM targets WHERE active = 1"),
+        // Active targets with their latest snapshot's mutual_guilds JSON
+        // attached. One query instead of an N+1 getLatestSnapshot loop —
+        // used by index.ts:requestInitialPresences and subscribeGuildPresences.
+        // The correlated subquery hits the (target_id, timestamp) index so it
+        // costs one btree-descend per row, not a full scan.
+        getActiveTargetsWithMutualGuilds: db.prepare(
+            `SELECT t.user_id,
+                    (SELECT mutual_guilds FROM profile_snapshots
+                     WHERE target_id = t.user_id
+                     ORDER BY timestamp DESC LIMIT 1) AS mutual_guilds
+             FROM   targets t
+             WHERE  t.active = 1`
+        ),
         updateTarget: db.prepare(
             "UPDATE targets SET label = COALESCE(?, label), notes = COALESCE(?, notes), priority = COALESCE(?, priority), active = COALESCE(?, active) WHERE user_id = ?"
         ),
@@ -32,6 +45,15 @@ function prepareStatements() {
         ),
         getEventsFiltered: db.prepare(
             "SELECT * FROM events WHERE target_id = ? AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        ),
+        // Slim projection of (event_type, timestamp) only — used by routine and
+        // correlation detectors which iterate tens of thousands of events and
+        // never touch the `data` column. Dropping the JSON blob from the row
+        // shape ~10× the per-row memory cost.
+        getEventTypeTimestamps: db.prepare(
+            "SELECT event_type, timestamp FROM events " +
+            "WHERE target_id = ? AND timestamp >= ? AND timestamp <= ? " +
+            "ORDER BY timestamp DESC LIMIT ?"
         ),
         getEventCount: db.prepare("SELECT COUNT(*) as count FROM events"),
         getEventCountByTarget: db.prepare("SELECT COUNT(*) as count FROM events WHERE target_id = ?"),
@@ -101,6 +123,14 @@ function prepareStatements() {
         ),
         getActivitySessions: db.prepare(
             "SELECT * FROM activity_sessions WHERE target_id = ? AND start_time >= ? ORDER BY start_time DESC LIMIT ?"
+        ),
+        // Distinct game names a target has played before a cutoff. Used to seed
+        // the in-memory "games seen" set for the NEW_GAME alert. Excluding the
+        // last 60 s lets us preserve the original "fires on first launch even if
+        // the row was just inserted by this very tick" semantics.
+        getDistinctGameNamesBefore: db.prepare(
+            "SELECT DISTINCT activity_name FROM activity_sessions " +
+            "WHERE target_id = ? AND activity_type = 0 AND start_time < ?"
         ),
 
         // ── Voice sessions ─────────────────────────────────────────────────────

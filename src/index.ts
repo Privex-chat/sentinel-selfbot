@@ -165,41 +165,32 @@ function closeStaleOpenSessions(): void {
 // ── Gateway: initial presence request ─────────────────────────────────────────
 
 function requestInitialPresences(client: GatewayClient): void {
-    const stmts   = getStmts();
-    const targets = stmts.getActiveTargets.all() as any[];
-    if (targets.length === 0) return;
+    const stmts = getStmts();
+    // Single query returns (user_id, mutual_guilds-or-null) per active target.
+    // Replaces the previous 2×N+1 loop that called getLatestSnapshot per target,
+    // twice (once for the primary pass, once for the fallback pass).
+    const rows = stmts.getActiveTargetsWithMutualGuilds.all() as Array<{ user_id: string; mutual_guilds: string | null }>;
+    if (rows.length === 0) return;
 
     const guildTargetMap = new Map<string, Set<string>>();
+    const selfbotGuilds = client.getGuilds();
 
-    // Primary: use stored mutual_guilds from profile snapshots
-    for (const target of targets) {
-        const snapshot = stmts.getLatestSnapshot.get(target.user_id) as any;
-        if (!snapshot?.mutual_guilds) continue;
-
-        let guilds: any[] = [];
-        try { guilds = JSON.parse(snapshot.mutual_guilds); } catch { }
-
-        for (const guild of guilds) {
-            const guildId: string = typeof guild === "string" ? guild : guild.id;
-            if (!guildId) continue;
-            const existing = guildTargetMap.get(guildId) ?? new Set();
-            existing.add(target.user_id);
-            guildTargetMap.set(guildId, existing);
+    for (const row of rows) {
+        let guilds: any[] | null = null;
+        if (row.mutual_guilds) {
+            try { guilds = JSON.parse(row.mutual_guilds); } catch { /* malformed — fall through */ }
         }
-    }
 
-    // Fallback: for targets with no snapshot data, request from ALL selfbot guilds
-    // so new targets get their initial presence without waiting for a profile poll.
-    const selfbotGuilds: any[] = client.getGuilds();
-    for (const target of targets) {
-        const snapshot = stmts.getLatestSnapshot.get(target.user_id) as any;
-        if (snapshot?.mutual_guilds) continue; // already covered above
+        // Primary: per-target mutual guild list, if we have it.
+        // Fallback: every selfbot guild, so newly-added targets without snapshot
+        // data still get an initial presence request.
+        const source: any[] = (guilds && guilds.length > 0) ? guilds : selfbotGuilds;
 
-        for (const guild of selfbotGuilds) {
-            const guildId: string = typeof guild === "string" ? guild : guild.id;
+        for (const guild of source) {
+            const guildId: string = typeof guild === "string" ? guild : guild?.id;
             if (!guildId) continue;
             const existing = guildTargetMap.get(guildId) ?? new Set();
-            existing.add(target.user_id);
+            existing.add(row.user_id);
             guildTargetMap.set(guildId, existing);
         }
     }
@@ -219,7 +210,7 @@ function requestInitialPresences(client: GatewayClient): void {
 
     const STAGGER_MS = 600;
     log.info(
-        `Requesting initial presences: ${batches.length} batch(es) for ${targets.length} target(s)` +
+        `Requesting initial presences: ${batches.length} batch(es) for ${rows.length} target(s)` +
         ` — staggered over ${(batches.length * STAGGER_MS / 1000).toFixed(1)}s`
     );
 
@@ -246,23 +237,24 @@ function requestInitialPresences(client: GatewayClient): void {
 let presenceSubscriptionInterval: NodeJS.Timeout | null = null;
 
 function subscribeGuildPresences(client: GatewayClient): void {
-    const stmts   = getStmts();
-    const targets = stmts.getActiveTargets.all() as any[];
-    if (!targets.length) return;
+    const stmts = getStmts();
+    // Same single-query optimisation as requestInitialPresences. Returns one row
+    // per active target; mutual_guilds may be null when no snapshot exists.
+    const rows = stmts.getActiveTargetsWithMutualGuilds.all() as Array<{ user_id: string; mutual_guilds: string | null }>;
+    if (!rows.length) return;
 
     // Build guild → Set<userId> so each op 14 carries the right member list.
     const guildMembers = new Map<string, Set<string>>();
 
-    for (const target of targets) {
-        const snapshot = stmts.getLatestSnapshot.get(target.user_id) as any;
-        if (!snapshot?.mutual_guilds) continue;
+    for (const row of rows) {
+        if (!row.mutual_guilds) continue;
         try {
-            const guilds = JSON.parse(snapshot.mutual_guilds) as any[];
+            const guilds = JSON.parse(row.mutual_guilds) as any[];
             for (const g of guilds) {
                 const id: string | undefined = typeof g === "string" ? g : g.id;
                 if (!id) continue;
                 const set = guildMembers.get(id) ?? new Set<string>();
-                set.add(target.user_id);
+                set.add(row.user_id);
                 guildMembers.set(id, set);
             }
         } catch { /* malformed JSON — skip */ }
@@ -289,10 +281,9 @@ function subscribeGuildPresences(client: GatewayClient): void {
         }, delay);
     }
 
-    const targetCount = new Set(targets.map((t: any) => t.user_id)).size;
     log.info(
         `Subscribed to presence stream for ${guildMembers.size} guild(s), ` +
-        `tracking ${targetCount} target(s) via op 14 member push`
+        `tracking ${rows.length} target(s) via op 14 member push`
     );
 }
 

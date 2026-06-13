@@ -24,7 +24,10 @@ export function detectRoutine(targetId: string, weeks: number = 4): RoutinePatte
     const tz = getTargetTimezone(targetId);
     const since = Date.now() - weeks * 7 * 86400000;
 
-    const events = stmts.getEventsFiltered.all(targetId, since, Date.now(), 50000, 0) as any[];
+    // Slim projection: we only need event_type + timestamp for the 7×24 bucket
+    // grid. Dropping the data blob keeps the JS heap footprint small even with
+    // 50k events.
+    const events = stmts.getEventTypeTimestamps.all(targetId, since, Date.now(), 50000) as Array<{ event_type: string; timestamp: number }>;
 
     // Build 7x24 grid keyed by the target's local day-of-week and hour. A
     // routine that fires at "noon local" should land in the noon bucket

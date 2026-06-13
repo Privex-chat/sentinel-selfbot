@@ -4,7 +4,7 @@ import { getStmts } from "../database/queries";
 import { analyzeSleepSchedule } from "./sleep-schedule";
 import { computeZScore, isAnomaly } from "./baseline";
 import { getTargetTimezone } from "../target-lifecycle";
-import { getHourInTz, getDateStrInTz } from "../utils/timezone";
+import { getHourInTz } from "../utils/timezone";
 
 const log = createLogger("AnomalyDetector");
 
@@ -16,60 +16,83 @@ export interface Anomaly {
     data?: any;
 }
 
+/**
+ * Detect anomalies for a target across the last `days` window.
+ *
+ * Previous implementation bulk-loaded up to 60 000 events (10 000 recent +
+ * 50 000 baseline) and then JS-filtered them N times — including an O(N×M)
+ * scan for the NEW_GAME check. On a busy target that was multiple seconds of
+ * synchronous work per `/insights/anomalies` request.
+ *
+ * Now each anomaly type runs a targeted SQL aggregate or filtered SELECT, so
+ * we only pull the rows we actually need. The new-game check uses
+ * `json_extract` to compare names directly inside SQLite instead of materialising
+ * thousands of activity events on the JS heap.
+ */
 export function detectAnomalies(targetId: string, days: number = 7): Anomaly[] {
-    const stmts = getStmts();
+    const db = getDb();
     const tz = getTargetTimezone(targetId);
     const anomalies: Anomaly[] = [];
     const now = Date.now();
     const since = now - days * 86400000;
     const baselineSince = now - 30 * 86400000;
+    const baselineDayCount = Math.max((since - baselineSince) / 86400000, 1);
 
-    // Get recent events
-    const recentEvents = stmts.getEventsFiltered.all(targetId, since, now, 10000, 0) as any[];
-    const baselineEvents = stmts.getEventsFiltered.all(targetId, baselineSince, since, 50000, 0) as any[];
-
-    // 1. Unusual online hours (sleep schedule)
+    // ── 1. Unusual online hours (sleep window) ─────────────────────────────
+    // Only fetch PRESENCE_UPDATE rows in the recent window — much smaller than
+    // the full event set. data is JSON and we need newStatus + timestamp.
     const sleep = analyzeSleepSchedule(targetId);
     if (sleep.estimatedBedtime && sleep.estimatedWakeTime) {
-        const presenceEvents = recentEvents.filter((e: any) => e.event_type === "PRESENCE_UPDATE");
+        const presenceEvents = db.prepare(
+            `SELECT timestamp, data FROM events
+             WHERE target_id = ? AND event_type = 'PRESENCE_UPDATE' AND timestamp >= ?`
+        ).all(targetId, since) as Array<{ timestamp: number; data: string }>;
+
+        const bedHour  = parseInt(sleep.estimatedBedtime!.split(":")[0], 10);
+        const wakeHour = parseInt(sleep.estimatedWakeTime!.split(":")[0], 10);
+
         for (const e of presenceEvents) {
             try {
                 const data = JSON.parse(e.data);
-                if (data.newStatus !== "offline") {
-                    // Hour-of-day in the target's tz so "online at 3am" reflects
-                    // their local clock, not the host's.
-                    const hour = getHourInTz(e.timestamp, tz);
-                    const bedHour = parseInt(sleep.estimatedBedtime!.split(":")[0]);
-                    const wakeHour = parseInt(sleep.estimatedWakeTime!.split(":")[0]);
-                    let isSleepHour = false;
-                    if (bedHour > wakeHour) {
-                        isSleepHour = hour >= bedHour || hour < wakeHour;
-                    } else if (bedHour < wakeHour) {
-                        isSleepHour = hour >= bedHour && hour < wakeHour;
-                    }
-                    if (isSleepHour) {
-                        anomalies.push({
-                            type: "UNUSUAL_HOUR",
-                            severity: "medium",
-                            description: `Online at ${hour}:00 (usual sleep: ${sleep.estimatedBedtime}-${sleep.estimatedWakeTime})`,
-                            timestamp: e.timestamp,
-                        });
-                    }
+                if (data.newStatus === "offline") continue;
+
+                const hour = getHourInTz(e.timestamp, tz);
+                let isSleepHour = false;
+                if (bedHour > wakeHour) {
+                    isSleepHour = hour >= bedHour || hour < wakeHour;
+                } else if (bedHour < wakeHour) {
+                    isSleepHour = hour >= bedHour && hour < wakeHour;
                 }
-            } catch { }
+                if (isSleepHour) {
+                    anomalies.push({
+                        type: "UNUSUAL_HOUR",
+                        severity: "medium",
+                        description: `Online at ${hour}:00 (usual sleep: ${sleep.estimatedBedtime}-${sleep.estimatedWakeTime})`,
+                        timestamp: e.timestamp,
+                    });
+                }
+            } catch { /* malformed JSON — skip */ }
         }
     }
 
-    // 2. Message volume anomaly — z-score based
-    const recentMsgCount = recentEvents.filter((e: any) => e.event_type === "MESSAGE_CREATE").length;
+    // ── 2. Message-volume anomaly ──────────────────────────────────────────
+    // Pure aggregates — let SQLite count, never touch the rows in JS.
+    const recentMsgCount = (db.prepare(
+        `SELECT COUNT(*) AS c FROM events
+         WHERE target_id = ? AND event_type = 'MESSAGE_CREATE' AND timestamp >= ?`
+    ).get(targetId, since) as { c: number }).c;
     const recentDailyMsgs = recentMsgCount / days;
 
     if (isAnomaly(targetId, "daily_message_count", recentDailyMsgs)) {
         const z = computeZScore(targetId, "daily_message_count", recentDailyMsgs);
+        const baselineMsgCount = (db.prepare(
+            `SELECT COUNT(*) AS c FROM events
+             WHERE target_id = ? AND event_type = 'MESSAGE_CREATE'
+               AND timestamp >= ? AND timestamp < ?`
+        ).get(targetId, baselineSince, since) as { c: number }).c;
+        const avgDailyMsgs = baselineMsgCount / baselineDayCount;
+
         if (z > 0) {
-            const baselineDays = Math.max((since - baselineSince) / 86400000, 1);
-            const baselineMsgCount = baselineEvents.filter((e: any) => e.event_type === "MESSAGE_CREATE").length;
-            const avgDailyMsgs = baselineMsgCount / baselineDays;
             anomalies.push({
                 type: "HIGH_MESSAGE_VOLUME",
                 severity: "low",
@@ -77,9 +100,6 @@ export function detectAnomalies(targetId: string, days: number = 7): Anomaly[] {
                 timestamp: now,
             });
         } else {
-            const baselineDays = Math.max((since - baselineSince) / 86400000, 1);
-            const baselineMsgCount = baselineEvents.filter((e: any) => e.event_type === "MESSAGE_CREATE").length;
-            const avgDailyMsgs = baselineMsgCount / baselineDays;
             anomalies.push({
                 type: "LOW_MESSAGE_VOLUME",
                 severity: "medium",
@@ -89,35 +109,47 @@ export function detectAnomalies(targetId: string, days: number = 7): Anomaly[] {
         }
     }
 
-    // 3. New game detection
-    const recentActivities = recentEvents.filter((e: any) => e.event_type === "ACTIVITY_START");
+    // ── 3. New-game detection ──────────────────────────────────────────────
+    // Pull just the activity-start events in the recent window. For each one,
+    // ask SQLite (via json_extract + EXISTS) whether the same game name appears
+    // in the baseline window. The previous O(N×M) JS join is now a tiny SQL
+    // lookup per recent row, indexed by (target_id, timestamp).
+    const recentActivities = db.prepare(
+        `SELECT timestamp, data FROM events
+         WHERE target_id = ? AND event_type = 'ACTIVITY_START' AND timestamp >= ?`
+    ).all(targetId, since) as Array<{ timestamp: number; data: string }>;
+
+    const baselineActivityExists = db.prepare(
+        `SELECT 1 FROM events
+         WHERE target_id = ? AND event_type = 'ACTIVITY_START'
+           AND timestamp >= ? AND timestamp < ?
+           AND json_extract(data, '$.name') = ?
+         LIMIT 1`
+    );
+
     for (const e of recentActivities) {
         try {
             const data = JSON.parse(e.data);
-            if (data.type === 0) {
-                const baselineHas = baselineEvents.some((be: any) => {
-                    if (be.event_type !== "ACTIVITY_START") return false;
-                    try {
-                        const bd = JSON.parse(be.data);
-                        return bd.name === data.name;
-                    } catch { return false; }
+            if (data.type !== 0 || !data.name) continue;
+            const hit = baselineActivityExists.get(targetId, baselineSince, since, data.name);
+            if (!hit) {
+                anomalies.push({
+                    type: "NEW_GAME",
+                    severity: "low",
+                    description: `Playing "${data.name}" for the first time`,
+                    timestamp: e.timestamp,
                 });
-                if (!baselineHas) {
-                    anomalies.push({
-                        type: "NEW_GAME",
-                        severity: "low",
-                        description: `Playing "${data.name}" for the first time`,
-                        timestamp: e.timestamp,
-                    });
-                }
             }
-        } catch { }
+        } catch { /* malformed JSON — skip */ }
     }
 
-    // 4. Profile changes
-    const profileChanges = recentEvents.filter((e: any) =>
-        ["PROFILE_UPDATE", "AVATAR_CHANGE", "USERNAME_CHANGE"].includes(e.event_type)
-    );
+    // ── 4. Profile changes ─────────────────────────────────────────────────
+    const profileChanges = db.prepare(
+        `SELECT event_type, timestamp FROM events
+         WHERE target_id = ? AND timestamp >= ?
+           AND event_type IN ('PROFILE_UPDATE', 'AVATAR_CHANGE', 'USERNAME_CHANGE')`
+    ).all(targetId, since) as Array<{ event_type: string; timestamp: number }>;
+
     for (const e of profileChanges) {
         anomalies.push({
             type: "PROFILE_CHANGE",
@@ -127,15 +159,22 @@ export function detectAnomalies(targetId: string, days: number = 7): Anomaly[] {
         });
     }
 
-    // 5. Ghost typing spike — z-score based
-    const recentGhosts = recentEvents.filter((e: any) => e.event_type === "GHOST_TYPE").length;
+    // ── 5. Ghost-typing spike ──────────────────────────────────────────────
+    const recentGhosts = (db.prepare(
+        `SELECT COUNT(*) AS c FROM events
+         WHERE target_id = ? AND event_type = 'GHOST_TYPE' AND timestamp >= ?`
+    ).get(targetId, since) as { c: number }).c;
     const recentGhostDaily = recentGhosts / days;
+
     if (isAnomaly(targetId, "daily_ghost_type_count", recentGhostDaily)) {
         const z = computeZScore(targetId, "daily_ghost_type_count", recentGhostDaily);
         if (z > 0) {
-            const baselineDays = Math.max((since - baselineSince) / 86400000, 1);
-            const baselineGhosts = baselineEvents.filter((e: any) => e.event_type === "GHOST_TYPE").length;
-            const avgGhosts = baselineGhosts / baselineDays;
+            const baselineGhosts = (db.prepare(
+                `SELECT COUNT(*) AS c FROM events
+                 WHERE target_id = ? AND event_type = 'GHOST_TYPE'
+                   AND timestamp >= ? AND timestamp < ?`
+            ).get(targetId, baselineSince, since) as { c: number }).c;
+            const avgGhosts = baselineGhosts / baselineDayCount;
             anomalies.push({
                 type: "GHOST_TYPE_SPIKE",
                 severity: "low",
@@ -145,16 +184,16 @@ export function detectAnomalies(targetId: string, days: number = 7): Anomaly[] {
         }
     }
 
-    // 6. Low active time anomaly — use real minutes from daily_summaries (not event count)
+    // ── 6. Low active time anomaly ─────────────────────────────────────────
+    // Uses daily_summaries rather than event counts so it reflects real minutes.
     const sinceDate = new Date(since).toISOString().split("T")[0];
     const nowDate   = new Date(now).toISOString().split("T")[0];
-    const db        = getDb();
     const activeRow = db.prepare(
         `SELECT SUM(online_minutes + idle_minutes + dnd_minutes) AS total_minutes,
                 COUNT(*) AS day_count
          FROM daily_summaries
          WHERE target_id = ? AND date >= ? AND date < ?`
-    ).get(targetId, sinceDate, nowDate) as any;
+    ).get(targetId, sinceDate, nowDate) as { total_minutes: number | null; day_count: number };
 
     const recentDailyMins = activeRow?.day_count
         ? (activeRow.total_minutes || 0) / activeRow.day_count

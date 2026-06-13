@@ -498,16 +498,25 @@ export class SupabaseSyncEngine {
     }
 
     private async syncDailySummaries(db: Database.Database): Promise<void> {
-        const sevenDaysAgo = new Date(Date.now() - 7 * 86_400_000)
+        // computeDailySummaries() only writes TODAY's row (idempotent UPSERT).
+        // Yesterday's row stops being touched once we cross midnight UTC, so
+        // there is no reason to re-upload 7 days of frozen rows every cycle —
+        // that was hundreds of redundant Supabase writes per hour on installs
+        // with many active targets.
+        //
+        // Window = today + yesterday: today catches the live recompute, yesterday
+        // catches the final pre-midnight value in case the process restarted
+        // and missed the last tick before day-end.
+        const yesterday = new Date(Date.now() - 86_400_000)
             .toISOString()
             .split("T")[0];
         const rows = db
             .prepare("SELECT * FROM daily_summaries WHERE date >= ? ORDER BY date")
-            .all(sevenDaysAgo) as any[];
+            .all(yesterday) as any[];
 
         if (!rows.length) return;
         await upsertBatched(this.supabase, "daily_summaries", rows, "id");
-        log.debug(`daily_summaries: synced ${rows.length} rows`);
+        log.debug(`daily_summaries: synced ${rows.length} row(s) (today + yesterday window)`);
     }
 
     // ── v2 tables ──────────────────────────────────────────────────────────────

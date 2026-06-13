@@ -21,7 +21,9 @@ export function detectCorrelations(
     const now = Date.now();
     const since = now - days * 86_400_000;
 
-    const events = stmts.getEventsFiltered.all(targetId, since, now, 50000, 0) as any[];
+    // Slim projection (event_type + timestamp). Correlation analysis never
+    // touches the data column; loading it was ~10× the memory cost per row.
+    const events = stmts.getEventTypeTimestamps.all(targetId, since, now, 50000) as Array<{ event_type: string; timestamp: number }>;
     if (events.length < 10) return [];
 
     // Count per event type

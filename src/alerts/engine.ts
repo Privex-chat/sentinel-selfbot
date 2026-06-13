@@ -28,6 +28,34 @@ interface CompositeState {
 
 const compositeTracker = new Map<number, Map<string, CompositeState>>();
 
+// ── NEW_GAME known-games cache ───────────────────────────────────────────────
+//
+// Each ACTIVITY_START used to fan out a 1000-row activity_sessions read just to
+// answer "has this target played this game before?". With multiple targets and
+// frequent Discord rich-presence activity-start spam, that was a real hot path.
+// Cache one Set<gameName> per target; lazy-seeded from the DB on first miss with
+// a 60 s cutoff so the just-inserted session row from the current event doesn't
+// shadow itself.
+const knownGamesByTarget = new Map<string, Set<string>>();
+
+function getKnownGames(targetId: string): Set<string> {
+    let set = knownGamesByTarget.get(targetId);
+    if (set) return set;
+
+    try {
+        const stmts = getStmts();
+        const cutoff = Date.now() - 60_000;
+        const rows = stmts.getDistinctGameNamesBefore.all(targetId, cutoff) as Array<{ activity_name: string }>;
+        set = new Set(rows.map(r => r.activity_name));
+    } catch (err: any) {
+        log.warn(`NEW_GAME cache seed failed for ${targetId}: ${err.message}`);
+        set = new Set();
+    }
+
+    knownGamesByTarget.set(targetId, set);
+    return set;
+}
+
 function cleanupStaleCompositeState(): void {
     const now = Date.now();
     for (const [ruleId, targetMap] of compositeTracker) {
@@ -49,12 +77,15 @@ function cleanupStaleCompositeState(): void {
 
 setInterval(cleanupStaleCompositeState, 60_000).unref?.();
 
-/** Drop every composite-tracker entry for this target across all rules. */
+/** Drop every composite-tracker entry for this target across all rules.
+ *  Also clears the NEW_GAME known-games cache so a re-added target with the
+ *  same userId starts fresh (and re-seeds from any historical activity rows). */
 export function removeTargetState(targetId: string): void {
     for (const [ruleId, targetMap] of compositeTracker) {
         targetMap.delete(targetId);
         if (!targetMap.size) compositeTracker.delete(ruleId);
     }
+    knownGamesByTarget.delete(targetId);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -341,16 +372,14 @@ function matchesCondition(
             if (parsed.type !== 0) return false;
             // Use rule target or the event's target — never bind undefined to the query
             const queryTarget = rule.target_id || targetId;
-            if (!queryTarget) return false;
-            try {
-                const stmts = getStmts();
-                const sessions = stmts.getActivitySessions.all(queryTarget, 0, 1000) as any[];
-                const playedBefore = sessions.some((s: any) =>
-                    s.activity_name === parsed.name && s.start_time < Date.now() - 60000
-                );
-                return !playedBefore;
-            } catch { }
-            return false;
+            if (!queryTarget || !parsed.name) return false;
+
+            const games = getKnownGames(queryTarget);
+            const isNew = !games.has(parsed.name);
+            // Record regardless of fire decision so the next ACTIVITY_START for
+            // the same game doesn't re-fire. Cheap and reliable.
+            games.add(parsed.name);
+            return isNew;
         }
 
         case "UNUSUAL_HOUR": {
