@@ -613,10 +613,19 @@ export class SupabaseSyncEngine {
         // without re-pushing every key on every tick. Sensitive values are
         // already encrypted at rest (runtime-config.ts:setRuntimeConfig);
         // this method ships the envelope as-is without ever seeing plaintext.
+        //
+        // Keys prefixed `_internal_` are per-instance bookkeeping (e.g.
+        // `_internal_last_summary_notified_date`) and must not propagate to
+        // Supabase — they'd cross-contaminate other instances on hydrate.
+        // The substr() check is exact-prefix so `internal_*` (no leading
+        // underscore) wouldn't accidentally match.
         const { lastAt } = getSyncState(db, "runtime_config");
         const rows = db
             .prepare(
-                "SELECT key, value, updated_at FROM runtime_config WHERE updated_at > ? ORDER BY updated_at LIMIT ?"
+                `SELECT key, value, updated_at FROM runtime_config
+                 WHERE updated_at > ?
+                   AND substr(key, 1, 10) != '_internal_'
+                 ORDER BY updated_at LIMIT ?`
             )
             .all(lastAt, BATCH_SIZE * 5) as any[];
         if (!rows.length) return;

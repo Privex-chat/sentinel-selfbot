@@ -145,7 +145,20 @@ export async function hydrateFromSupabase(): Promise<void> {
 
     for (const { name, orderCol } of TABLES) {
         log.info(`Fetching ${name}…`);
-        const rows = await fetchAllRows(supabase, name, orderCol);
+        let rows = await fetchAllRows(supabase, name, orderCol);
+
+        // Strip per-instance `_internal_*` runtime_config keys before insert.
+        // These are local bookkeeping and must not cross between instances —
+        // e.g. another bot's `_internal_last_summary_notified_date` would
+        // suppress today's summary notification on this instance.
+        if (name === "runtime_config") {
+            const before = rows.length;
+            rows = rows.filter(r => !(typeof r.key === "string" && r.key.startsWith("_internal_")));
+            const dropped = before - rows.length;
+            if (dropped > 0) {
+                log.info(`  ${name}: filtered ${dropped} _internal_* row(s) from hydrate`);
+            }
+        }
 
         if (rows.length > 0) {
             bulkInsert(db, name, rows);
