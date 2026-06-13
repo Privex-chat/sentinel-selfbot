@@ -99,8 +99,12 @@ const KEY_MAP: Record<RuntimeKey, { prop: keyof typeof config; parse: (v: string
 /**
  * Validate a runtime value before it is applied and persisted.
  * Returns an error message string on failure, or null on success.
+ *
+ * Exported so unit tests can exercise the validation rules without standing
+ * up a full DB + encryption layer. Production callers route through
+ * `setRuntimeConfig`, which runs this internally.
  */
-function validateRuntimeValue(key: RuntimeKey, value: string): string | null {
+export function validateRuntimeValue(key: RuntimeKey, value: string): string | null {
     const entry = KEY_MAP[key];
     if (!entry) return null;
 

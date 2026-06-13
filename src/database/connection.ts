@@ -15,14 +15,27 @@ export function getDb(): Database.Database {
     return db;
 }
 
-export function initDatabase(): Database.Database {
-    const dbDir = path.dirname(config.dbPath);
-    if (!fs.existsSync(dbDir)) {
-        fs.mkdirSync(dbDir, { recursive: true });
+/**
+ * Open the SQLite handle and apply standard PRAGMAs.
+ *
+ * `pathOverride` is an explicit-opt-in for tests so they can ask for `:memory:`
+ * without mucking about with `process.env.DB_PATH` ordering and module init.
+ * Production callers pass nothing — `config.dbPath` is the source of truth.
+ */
+export function initDatabase(pathOverride?: string): Database.Database {
+    const dbPath = pathOverride ?? config.dbPath;
+
+    // Skip mkdir for in-memory and URI-style paths (`:memory:`, `file::memory:?...`)
+    // — they don't have a directory.
+    if (dbPath !== ":memory:" && !dbPath.startsWith("file:")) {
+        const dbDir = path.dirname(dbPath);
+        if (!fs.existsSync(dbDir)) {
+            fs.mkdirSync(dbDir, { recursive: true });
+        }
     }
 
-    log.info(`Opening database at ${config.dbPath}`);
-    db = new Database(config.dbPath);
+    log.info(`Opening database at ${dbPath}`);
+    db = new Database(dbPath);
 
     db.pragma("journal_mode = WAL");
     db.pragma("synchronous = NORMAL");
