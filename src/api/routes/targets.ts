@@ -2,6 +2,7 @@ import { FastifyInstance } from "fastify";
 import { getStmts } from "../../database/queries";
 import { getDb } from "../../database/connection";
 import { config } from "../../utils/config";
+import { isValidTimezone } from "../../utils/timezone";
 import { startBackfillForTarget } from "../../backfill/backfill-engine";
 import { requestPresenceForUser } from "../../pollers/status-poller";
 import { onTargetRemoved, refreshTargetCache } from "../../target-lifecycle";
@@ -19,10 +20,17 @@ export function registerTargetRoutes(app: FastifyInstance): void {
         return stmts.getAllTargets.all();
     });
 
-    app.post<{ Body: { userId: string; label?: string; notes?: string; priority?: number } }>("/api/targets", async (req, reply) => {
-        const { userId, label, notes, priority } = req.body;
+    app.post<{ Body: { userId: string; label?: string; notes?: string; priority?: number; timezone?: string } }>("/api/targets", async (req, reply) => {
+        const { userId, label, notes, priority, timezone } = req.body;
         if (!userId || !/^\d{17,20}$/.test(userId)) {
             return reply.code(400).send({ error: "Invalid userId" });
+        }
+
+        // Optional timezone; defaults to UTC at the DB layer. Validated against
+        // ICU's IANA tables — accepted form is "Area/City" or "UTC".
+        const tz = timezone ?? "UTC";
+        if (!isValidTimezone(tz)) {
+            return reply.code(400).send({ error: `Invalid timezone "${tz}". Expected an IANA identifier (e.g. America/New_York, Europe/London, UTC).` });
         }
 
         const db = getDb();
@@ -49,7 +57,7 @@ export function registerTargetRoutes(app: FastifyInstance): void {
             return reply.code(400).send({ error: "priority must be a non-negative integer" });
         }
         const stmts = getStmts();
-        stmts.insertTarget.run(userId, Date.now(), label || null, notes || null, priorityVal, 1);
+        stmts.insertTarget.run(userId, Date.now(), label || null, notes || null, priorityVal, 1, tz);
         refreshTargetCache();
 
         if (config.backfillEnabled) {
@@ -81,7 +89,7 @@ export function registerTargetRoutes(app: FastifyInstance): void {
 
     app.patch<{
         Params: { userId: string };
-        Body: { label?: string | null; notes?: string | null; priority?: number; active?: boolean };
+        Body: { label?: string | null; notes?: string | null; priority?: number; active?: boolean; timezone?: string };
     }>("/api/targets/:userId", async (req, reply) => {
         const db = getDb();
         const body = req.body;
@@ -112,13 +120,21 @@ export function registerTargetRoutes(app: FastifyInstance): void {
             setParts.push("active = ?");
             params.push(body.active ? 1 : 0);
         }
+        if ("timezone" in body && body.timezone !== undefined) {
+            if (!isValidTimezone(body.timezone)) {
+                return reply.code(400).send({ error: `Invalid timezone "${body.timezone}". Expected an IANA identifier (e.g. America/New_York, Europe/London, UTC).` });
+            }
+            setParts.push("timezone = ?");
+            params.push(body.timezone);
+        }
 
         if (setParts.length > 0) {
             params.push(userId);
             db.prepare(`UPDATE targets SET ${setParts.join(", ")} WHERE user_id = ?`).run(...params);
-            // Refresh only when `active` could have changed — that's the only
-            // column that controls cache membership.
-            if ("active" in body) refreshTargetCache();
+            // Refresh on any change that the in-memory cache mirrors: `active`
+            // controls cache membership, `timezone` is now read on every analyser
+            // call. Other fields don't need a refresh.
+            if ("active" in body || "timezone" in body) refreshTargetCache();
         }
 
         return { success: true };

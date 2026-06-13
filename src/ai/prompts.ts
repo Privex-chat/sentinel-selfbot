@@ -28,6 +28,9 @@ export interface BriefStats {
     targetId: string;
     label: string | null;
     date: string;
+    /** IANA tz the brief is rendered in (e.g. "America/New_York"). UTC for
+     *  back-compat targets that haven't set one. */
+    timezone: string;
     onlineMinutes: number;
     idleMinutes: number;
     dndMinutes: number;

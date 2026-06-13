@@ -4,6 +4,8 @@ import { getStmts } from "../database/queries";
 import { config } from "../utils/config";
 import { ai } from "../ai/provider";
 import { BriefStats, dailyBriefNarrativePrompt } from "../ai/prompts";
+import { getTargetTimezone } from "../target-lifecycle";
+import { getPartsInTz } from "../utils/timezone";
 
 export type { BriefStats };
 
@@ -11,28 +13,32 @@ const log = createLogger("BriefGenerator");
 
 // ── Time formatting ───────────────────────────────────────────────────────────
 
-function formatTime(epochMs: number | null): string | null {
+function formatTime(epochMs: number | null, tz: string): string | null {
     if (!epochMs) return null;
-    const d = new Date(epochMs);
-    let h = d.getHours();
-    const m = d.getMinutes().toString().padStart(2, "0");
+    const p = getPartsInTz(epochMs, tz);
+    let h = p.hour;
+    const m = p.minute.toString().padStart(2, "0");
     const ampm = h >= 12 ? "pm" : "am";
     h = h % 12 || 12;
     return `${h}:${m}${ampm}`;
 }
 
-function dayName(dateStr: string): string {
+// Day / month / day-number derived from the date string anchored at noon UTC,
+// then projected through the target's tz so a brief labelled "Tuesday" really
+// is Tuesday for the target (not Monday or Wednesday across an IDL spread).
+function dayName(dateStr: string, tz: string): string {
     const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-    return days[new Date(dateStr + "T12:00:00").getDay()];
+    return days[getPartsInTz(new Date(dateStr + "T12:00:00Z").getTime(), tz).weekday];
 }
 
-function monthName(dateStr: string): string {
+function monthName(dateStr: string, tz: string): string {
     const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-    return months[new Date(dateStr + "T12:00:00").getMonth()];
+    const p = getPartsInTz(new Date(dateStr + "T12:00:00Z").getTime(), tz);
+    return months[p.month - 1];
 }
 
-function dayNum(dateStr: string): number {
-    return new Date(dateStr + "T12:00:00").getDate();
+function dayNum(dateStr: string, tz: string): number {
+    return getPartsInTz(new Date(dateStr + "T12:00:00Z").getTime(), tz).day;
 }
 
 // ── Stats builder ─────────────────────────────────────────────────────────────
@@ -40,8 +46,10 @@ function dayNum(dateStr: string): number {
 function buildBriefStats(targetId: string, dateStr: string): BriefStats {
     const db = getDb();
     const stmts = getStmts();
+    const tz = getTargetTimezone(targetId);
     // dateStr is a UTC date (YYYY-MM-DD derived from toISOString()). Compute day
     // boundaries in UTC so day-edge events are counted under the matching date.
+    // The brief's day-of-week and time-of-day labels are projected through `tz`.
     const dayStart = new Date(dateStr + "T00:00:00Z").getTime();
     const dayEnd = dayStart + 86_400_000;
 
@@ -120,13 +128,14 @@ function buildBriefStats(targetId: string, dateStr: string): BriefStats {
         targetId,
         label: target?.label || null,
         date: dateStr,
+        timezone: tz,
         onlineMinutes: summary?.online_minutes || 0,
         idleMinutes: summary?.idle_minutes || 0,
         dndMinutes: summary?.dnd_minutes || 0,
         messageCount: summary?.message_count || 0,
         voiceMinutes: summary?.voice_minutes || 0,
-        firstSeen: formatTime(summary?.first_seen),
-        lastSeen: formatTime(summary?.last_seen),
+        firstSeen: formatTime(summary?.first_seen, tz),
+        lastSeen: formatTime(summary?.last_seen, tz),
         platformUsed,
         topActivities,
         deletedMessages: deleted?.count || 0,
@@ -141,9 +150,9 @@ function buildBriefStats(targetId: string, dateStr: string): BriefStats {
 
 function formatBriefText(stats: BriefStats, aiNarrative?: string): string {
     const label = stats.label || stats.targetId;
-    const day = dayName(stats.date);
-    const month = monthName(stats.date);
-    const dayN = dayNum(stats.date);
+    const day = dayName(stats.date, stats.timezone);
+    const month = monthName(stats.date, stats.timezone);
+    const dayN = dayNum(stats.date, stats.timezone);
     const totalActive = stats.onlineMinutes + stats.idleMinutes + stats.dndMinutes;
     const activeH = Math.floor(totalActive / 60);
     const activeM = totalActive % 60;

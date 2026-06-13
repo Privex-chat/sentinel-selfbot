@@ -1,5 +1,7 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
+import { getTargetTimezone } from "../target-lifecycle";
+import { getDateStrInTz, getHourFloatInTz, getDayOfWeekInTz } from "../utils/timezone";
 
 const log = createLogger("SleepAnalyzer");
 
@@ -14,16 +16,30 @@ export interface SleepSchedule {
     irregularities: string[];
     confidence: number;
     dataPoints: number;
+    /** IANA timezone the analysis was computed against — surface so the operator can sanity-check. */
+    timezone: string;
 }
 
 export function analyzeSleepSchedule(targetId: string, days: number = 14): SleepSchedule {
     const stmts = getStmts();
+    const tz = getTargetTimezone(targetId);
     const since = Date.now() - days * 86400000;
 
     const sessions = stmts.getPresenceSessions.all(targetId, since, Date.now()) as any[];
 
-    // Find long offline sessions (>3 hours) as potential sleep periods
-    const sleepSessions: { start: Date; end: Date; duration: number }[] = [];
+    // Find long offline sessions (>3 hours) as potential sleep periods.
+    // start/end stored as epoch ms; all hour/day extraction routes through the
+    // target's tz so the bedtime/wake-time numbers reflect their local clock,
+    // not the host server's.
+    const sleepSessions: {
+        startEpoch: number;
+        endEpoch: number;
+        duration: number;
+        bedHour: number;
+        wakeHour: number;
+        bedDow: number;
+        bedDateStr: string;
+    }[] = [];
 
     for (const session of sessions) {
         if (session.status !== "offline" || !session.end_time) continue;
@@ -31,9 +47,13 @@ export function analyzeSleepSchedule(targetId: string, days: number = 14): Sleep
         if (duration < 3 * 3600000) continue; // Skip < 3 hours
 
         sleepSessions.push({
-            start: new Date(session.start_time),
-            end: new Date(session.end_time),
+            startEpoch: session.start_time,
+            endEpoch:   session.end_time,
             duration,
+            bedHour:    getHourFloatInTz(session.start_time, tz),
+            wakeHour:   getHourFloatInTz(session.end_time,   tz),
+            bedDow:     getDayOfWeekInTz(session.start_time, tz),
+            bedDateStr: getDateStrInTz(session.start_time,   tz),
         });
     }
 
@@ -44,63 +64,57 @@ export function analyzeSleepSchedule(targetId: string, days: number = 14): Sleep
             weekendBedtime: null, weekdayWakeTime: null,
             weekendWakeTime: null, irregularities: [],
             confidence: 0, dataPoints: sleepSessions.length,
+            timezone: tz,
         };
     }
 
-    // Extract bedtimes and wake times
-    const bedtimes = sleepSessions.map(s => s.start.getHours() + s.start.getMinutes() / 60);
-    const wakeTimes = sleepSessions.map(s => s.end.getHours() + s.end.getMinutes() / 60);
+    const bedtimes  = sleepSessions.map(s => s.bedHour);
+    const wakeTimes = sleepSessions.map(s => s.wakeHour);
     const durations = sleepSessions.map(s => s.duration / 3600000);
 
-    // Separate weekday vs weekend
-    const weekdayBed: number[] = [];
-    const weekendBed: number[] = [];
+    // Separate weekday vs weekend in the target's local tz (DOW 0=Sun, 6=Sat).
+    const weekdayBed:  number[] = [];
+    const weekendBed:  number[] = [];
     const weekdayWake: number[] = [];
     const weekendWake: number[] = [];
 
     for (const s of sleepSessions) {
-        const day = s.start.getDay();
-        const bedHour = s.start.getHours() + s.start.getMinutes() / 60;
-        const wakeHour = s.end.getHours() + s.end.getMinutes() / 60;
-
-        if (day === 0 || day === 6) { // Sunday=0, Saturday=6
-            weekendBed.push(bedHour);
-            weekendWake.push(wakeHour);
+        if (s.bedDow === 0 || s.bedDow === 6) {
+            weekendBed.push(s.bedHour);
+            weekendWake.push(s.wakeHour);
         } else {
-            weekdayBed.push(bedHour);
-            weekdayWake.push(wakeHour);
+            weekdayBed.push(s.bedHour);
+            weekdayWake.push(s.wakeHour);
         }
     }
 
     const irregularities: string[] = [];
-    // Use a wrap-aware median for time-of-day values. The naive median collapses
-    // for users whose bedtimes straddle midnight (e.g. 23:30 + 01:00 → median ≈
-    // 12:15, which is nonsense). circularMedianHours detects the wrap and shifts
-    // the pre-noon values into a continuous post-midnight range before sorting.
-    const medianBed = circularMedianHours(bedtimes);
+    // Wrap-aware median for time-of-day values so bedtimes straddling midnight
+    // (e.g. 23:30 + 01:00) don't collapse to a nonsensical noon median.
+    const medianBed  = circularMedianHours(bedtimes);
     const medianWake = circularMedianHours(wakeTimes);
 
-    // Detect all-nighters (went to sleep after 5am)
+    // All-nighter detection: went to sleep between 5am and noon in the local tz.
     for (const s of sleepSessions) {
-        const h = s.start.getHours();
-        if (h >= 5 && h < 12) {
-            irregularities.push(`All-nighter on ${s.start.toISOString().split("T")[0]}`);
+        if (s.bedHour >= 5 && s.bedHour < 12) {
+            irregularities.push(`All-nighter on ${s.bedDateStr}`);
         }
     }
 
     const confidence = Math.min(sleepSessions.length / days, 1) * 100;
 
     return {
-        estimatedBedtime: formatHour(medianBed),
-        estimatedWakeTime: formatHour(medianWake),
+        estimatedBedtime:      formatHour(medianBed),
+        estimatedWakeTime:     formatHour(medianWake),
         avgSleepDurationHours: Math.round(median(durations) * 10) / 10,
-        weekdayBedtime: weekdayBed.length >= 2 ? formatHour(median(weekdayBed)) : null,
-        weekendBedtime: weekendBed.length >= 2 ? formatHour(median(weekendBed)) : null,
-        weekdayWakeTime: weekdayWake.length >= 2 ? formatHour(median(weekdayWake)) : null,
-        weekendWakeTime: weekendWake.length >= 2 ? formatHour(median(weekendWake)) : null,
+        weekdayBedtime:        weekdayBed.length  >= 2 ? formatHour(median(weekdayBed))  : null,
+        weekendBedtime:        weekendBed.length  >= 2 ? formatHour(median(weekendBed))  : null,
+        weekdayWakeTime:       weekdayWake.length >= 2 ? formatHour(median(weekdayWake)) : null,
+        weekendWakeTime:       weekendWake.length >= 2 ? formatHour(median(weekendWake)) : null,
         irregularities,
         confidence: Math.round(confidence),
         dataPoints: sleepSessions.length,
+        timezone:   tz,
     };
 }
 

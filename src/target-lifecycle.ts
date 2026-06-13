@@ -44,12 +44,28 @@ const log = createLogger("TargetLifecycle");
 
 const activeTargetSet = new Set<string>();
 
+// Per-target IANA timezone, cached alongside the active set. Hot-path analysers
+// (alerts/engine.ts:UNUSUAL_HOUR, sleep-schedule, routine-detector, baseline
+// DOW computation, brief day labels) read this on every event. The cache
+// includes paused targets too — analytics on a paused target should still use
+// the operator-set timezone.
+const targetTimezones = new Map<string, string>();
+
 export function refreshTargetCache(): void {
     try {
-        const rows = getStmts().getActiveTargets.all() as Array<{ user_id: string }>;
+        // SELECT both active + paused: timezone applies to analytics regardless of active state.
+        const activeRows = getStmts().getActiveTargets.all() as Array<{ user_id: string; timezone?: string }>;
+        const allRows    = getStmts().getAllTargets.all()    as Array<{ user_id: string; timezone?: string }>;
+
         activeTargetSet.clear();
-        for (const row of rows) activeTargetSet.add(row.user_id);
-        log.debug(`Target cache refreshed (${activeTargetSet.size} active)`);
+        for (const row of activeRows) activeTargetSet.add(row.user_id);
+
+        targetTimezones.clear();
+        for (const row of allRows) {
+            targetTimezones.set(row.user_id, row.timezone || "UTC");
+        }
+
+        log.debug(`Target cache refreshed (${activeTargetSet.size} active, ${targetTimezones.size} total)`);
     } catch (err: any) {
         log.warn(`Target cache refresh failed: ${err.message}`);
     }
@@ -61,6 +77,12 @@ export function isTargetCached(userId: string): boolean {
 
 export function getActiveTargetCount(): number {
     return activeTargetSet.size;
+}
+
+/** IANA timezone for a target. Returns "UTC" for unknown targets so analysers
+ *  never blow up on a missing row mid-removal. */
+export function getTargetTimezone(targetId: string): string {
+    return targetTimezones.get(targetId) ?? "UTC";
 }
 
 // ── Lifecycle cleanup ────────────────────────────────────────────────────────
@@ -79,5 +101,6 @@ export function onTargetRemoved(userId: string): void {
     // row, but we don't refresh from the DB here to avoid an extra round-trip
     // when several deletes land in close succession.
     activeTargetSet.delete(userId);
+    targetTimezones.delete(userId);
     log.debug(`In-memory state cleared for target ${userId}`);
 }

@@ -1,5 +1,7 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
+import { getTargetTimezone } from "../target-lifecycle";
+import { getPartsInTz } from "../utils/timezone";
 
 const log = createLogger("RoutineDetector");
 
@@ -19,20 +21,23 @@ export interface RoutinePattern {
 
 export function detectRoutine(targetId: string, weeks: number = 4): RoutinePattern {
     const stmts = getStmts();
+    const tz = getTargetTimezone(targetId);
     const since = Date.now() - weeks * 7 * 86400000;
 
     const events = stmts.getEventsFiltered.all(targetId, since, Date.now(), 50000, 0) as any[];
 
-    // Build 7x24 grid
+    // Build 7x24 grid keyed by the target's local day-of-week and hour. A
+    // routine that fires at "noon local" should land in the noon bucket
+    // regardless of where the selfbot host runs.
     const grid: { count: number; types: Record<string, number> }[][] =
         Array.from({ length: 7 }, () =>
             Array.from({ length: 24 }, () => ({ count: 0, types: {} }))
         );
 
     for (const event of events) {
-        const d = new Date(event.timestamp);
-        const dow = d.getDay();
-        const hour = d.getHours();
+        const p = getPartsInTz(event.timestamp, tz);
+        const dow = p.weekday;
+        const hour = p.hour;
         grid[dow][hour].count++;
         grid[dow][hour].types[event.event_type] = (grid[dow][hour].types[event.event_type] || 0) + 1;
     }
@@ -69,10 +74,11 @@ export function detectRoutine(targetId: string, weeks: number = 4): RoutinePatte
         }
     }
 
-    // Find today's anomalies
-    const now = new Date();
-    const todayDow = now.getDay();
-    const currentHour = now.getHours();
+    // Find today's anomalies — also in the target's local tz so "quiet at 3pm"
+    // means 3pm-for-the-target, not 3pm-for-the-host.
+    const nowParts = getPartsInTz(Date.now(), tz);
+    const todayDow = nowParts.weekday;
+    const currentHour = nowParts.hour;
     const todayBucket = weeklyGrid[todayDow][currentHour];
     if (!todayBucket.isTypical && todayBucket.eventCount === 0 && mean > 2) {
         anomalies.push(`Unusually quiet for ${dayNames[todayDow]} at ${currentHour}:00`);

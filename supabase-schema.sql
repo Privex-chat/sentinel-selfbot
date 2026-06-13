@@ -35,15 +35,23 @@ CREATE TABLE IF NOT EXISTS public.targets (
     notes    TEXT,
     priority INTEGER NOT NULL DEFAULT 0,
     active   INTEGER NOT NULL DEFAULT 1,
+    timezone TEXT    NOT NULL DEFAULT 'UTC',
 
     CONSTRAINT targets_priority_non_negative CHECK (priority >= 0),
     CONSTRAINT targets_active_bool           CHECK (active IN (0, 1))
 );
 
+-- Idempotent column add for existing Supabase deployments that pre-date the
+-- selfbot's schema v7. Runs harmlessly on fresh installs where the column was
+-- already defined above.
+ALTER TABLE public.targets
+    ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC';
+
 COMMENT ON TABLE  public.targets            IS 'Tracked Discord user accounts.';
 COMMENT ON COLUMN public.targets.user_id    IS 'Discord snowflake ID (17-20 digit string).';
 COMMENT ON COLUMN public.targets.added_at   IS 'Unix epoch ms when the target was added.';
 COMMENT ON COLUMN public.targets.active     IS '1 = actively tracked, 0 = paused.';
+COMMENT ON COLUMN public.targets.timezone   IS 'IANA timezone identifier (e.g. America/New_York). Defaults to UTC. Drives every per-target hour/day analyser.';
 
 
 -- =============================================================================

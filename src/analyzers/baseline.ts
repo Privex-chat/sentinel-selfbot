@@ -1,5 +1,7 @@
 import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
+import { getTargetTimezone } from "../target-lifecycle";
+import { getDayOfWeekInTz } from "../utils/timezone";
 
 const log = createLogger("Baseline");
 
@@ -76,6 +78,7 @@ export function computeBaselinesForTarget(
     windowDays: number = 30
 ): void {
     const stmts = getStmts();
+    const tz = getTargetTimezone(targetId);
     const now = Date.now();
 
     const summaries = stmts.getDailySummaries.all(targetId, windowDays) as any[];
@@ -107,8 +110,11 @@ export function computeBaselinesForTarget(
         metrics.daily_ghost_type_count.push(s.ghost_type_count || 0);
         metrics.daily_reaction_count.push(s.reaction_count || 0);
 
-        // Day of week for seasonality
-        const dow = new Date(s.date + "T12:00:00").getDay();
+        // Day of week for seasonality, anchored to noon in the target's tz so
+        // we land on the correct local calendar day regardless of how UTC noon
+        // maps to their local clock.
+        const noonEpoch = new Date(s.date + "T12:00:00Z").getTime();
+        const dow = getDayOfWeekInTz(noonEpoch, tz);
         dowMetrics[`dow_${dow}_active_minutes`].push(active);
     }
 

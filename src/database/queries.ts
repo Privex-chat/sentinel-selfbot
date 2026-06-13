@@ -10,7 +10,7 @@ function prepareStatements() {
     return {
         // ── Targets ────────────────────────────────────────────────────────────
         insertTarget: db.prepare(
-            "INSERT OR IGNORE INTO targets (user_id, added_at, label, notes, priority, active) VALUES (?, ?, ?, ?, ?, ?)"
+            "INSERT OR IGNORE INTO targets (user_id, added_at, label, notes, priority, active, timezone) VALUES (?, ?, ?, ?, ?, ?, ?)"
         ),
         getTarget: db.prepare("SELECT * FROM targets WHERE user_id = ?"),
         getAllTargets: db.prepare("SELECT * FROM targets"),

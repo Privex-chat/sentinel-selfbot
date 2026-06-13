@@ -13,6 +13,7 @@
  *   $resume <@user>        — re-activate a paused target
  *   $label  <@user> <text> — set display label for a target
  *   $note   <@user> <text> — append a timestamped note to a target
+ *   $tz     <@user> [tz]   — set or show the target's IANA timezone (default UTC)
  *   $status <@user>        — current presence & activities
  *   $seen   <@user>        — when the target was last online
  *   $uptime <@user>        — today's total active time
@@ -29,6 +30,7 @@
 import { createLogger } from "../utils/logger";
 import { config } from "../utils/config";
 import { discordFetch } from "../utils/rate-limiter";
+import { isValidTimezone } from "../utils/timezone";
 import { getDb } from "../database/connection";
 import { getStmts } from "../database/queries";
 import { startBackfillForTarget } from "../backfill/backfill-engine";
@@ -199,12 +201,12 @@ async function cmdAdd(channelId: string, args: string[]): Promise<void> {
         }
     }
 
-    getStmts().insertTarget.run(userId, Date.now(), null, null, 0, 1);
+    getStmts().insertTarget.run(userId, Date.now(), null, null, 0, 1, "UTC");
     refreshTargetCache();
     setTimeout(() => requestPresenceForUser(userId), 5_000);
     if (config.backfillEnabled) startBackfillForTarget(userId).catch(() => {});
 
-    await sendTempMessage(channelId, `✅ Target \`${userId}\` added. Presence subscription in 5 s.`);
+    await sendTempMessage(channelId, `✅ Target \`${userId}\` added. Presence subscription in 5 s. (Timezone defaults to UTC — set with \`$tz\`.)`);
     log.info(`Command: added target ${userId}`);
 }
 
@@ -321,6 +323,43 @@ async function cmdNote(channelId: string, args: string[]): Promise<void> {
 
     await sendTempMessage(channelId, `📝 Note appended to \`${userId}\`.`);
     log.info(`Command: appended note to ${userId}`);
+}
+
+async function cmdTimezone(channelId: string, args: string[]): Promise<void> {
+    const userId = args[0] ? parseUserId(args[0]) : null;
+    if (!userId) {
+        await sendTempMessage(channelId, "❌ Usage: `$tz <@user> [Area/City]` — omit timezone to show current.");
+        return;
+    }
+
+    const db  = getDb();
+    const row = db.prepare("SELECT timezone FROM targets WHERE user_id = ?")
+        .get(userId) as { timezone: string } | undefined;
+    if (!row) {
+        await sendTempMessage(channelId, `❌ \`${userId}\` is not a tracked target.`);
+        return;
+    }
+
+    // No tz argument → report current.
+    if (args.length < 2) {
+        await sendTempMessage(channelId, `🌍 \`${userId}\` timezone: **${row.timezone}**`);
+        return;
+    }
+
+    const tz = args.slice(1).join(" ").trim();
+    if (!isValidTimezone(tz)) {
+        await sendTempMessage(
+            channelId,
+            `❌ Invalid timezone \`${tz}\`. Use an IANA identifier like \`America/New_York\`, \`Europe/London\`, or \`UTC\`.`,
+            7_000
+        );
+        return;
+    }
+
+    db.prepare("UPDATE targets SET timezone = ? WHERE user_id = ?").run(tz, userId);
+    refreshTargetCache();
+    await sendTempMessage(channelId, `🌍 \`${userId}\` timezone set: **${row.timezone}** → **${tz}**`);
+    log.info(`Command: set timezone for ${userId}: "${row.timezone}" → "${tz}"`);
 }
 
 // ── Intelligence ──────────────────────────────────────────────────────────────
@@ -695,6 +734,7 @@ async function cmdHelp(channelId: string): Promise<void> {
         "`$resume <@user>`        — re-activate paused target\n" +
         "`$label <@user> <text>`  — set display label\n" +
         "`$note <@user> <text>`   — append timestamped note\n" +
+        "`$tz <@user> [Area/City]` — set or show IANA timezone (default UTC)\n" +
         "**Intelligence**\n" +
         "`$status <@user>`        — current presence & activities\n" +
         "`$seen <@user>`          — when last online\n" +
@@ -749,6 +789,8 @@ export async function handleSelfCommand(
             case "resume":  await cmdResume(channelId, args);  break;
             case "label":   await cmdLabel(channelId, args);   break;
             case "note":    await cmdNote(channelId, args);     break;
+            case "tz":
+            case "timezone": await cmdTimezone(channelId, args); break;
             case "status":  await cmdStatus(channelId, args);  break;
             case "seen":    await cmdSeen(channelId, args);     break;
             case "uptime":  await cmdUptime(channelId, args);  break;

@@ -4,6 +4,8 @@ import { AlertCondition, AlertRule, EVENT_TO_ALERT_MAP, ParsedComposite } from "
 import { config } from "../utils/config";
 import { enqueueWebhook } from "../utils/webhook-queue";
 import { addToDigest } from "./digest";
+import { getTargetTimezone } from "../target-lifecycle";
+import { getHourInTz } from "../utils/timezone";
 
 const log = createLogger("AlertEngine");
 
@@ -228,10 +230,14 @@ function matchesCondition(
     targetId: string
 ): boolean {
     const cond = rule.condition;
-    const eventTime = new Date(eventTimestamp);
 
     // Parse once — data is always a JSON string from the collector
     const parsed: any = typeof data === "string" ? safeParse(data) : data;
+
+    // Per-target tz drives any hour-of-day comparison so "after 10pm" / "between
+    // 2am and 6am" mean 10pm/2am-in-the-target's-clock, not the host's. Lazily
+    // looked up only by branches that need it.
+    const targetTz = getTargetTimezone(targetId);
 
     switch (rule.rule_type) {
         case "COMES_ONLINE": {
@@ -239,7 +245,7 @@ function matchesCondition(
             // processed: { newStatus, oldStatus, … }
             if (parsed.newStatus !== "online") return false;
             if (cond.after_hour !== undefined) {
-                const hour = eventTime.getHours();
+                const hour = getHourInTz(eventTimestamp, targetTz);
                 if (hour < cond.after_hour) return false;
             }
             return true;
@@ -350,7 +356,7 @@ function matchesCondition(
         case "UNUSUAL_HOUR": {
             if (eventType !== "PRESENCE_UPDATE") return false;
             if (parsed.newStatus === "offline") return false;
-            const hour = eventTime.getHours();
+            const hour = getHourInTz(eventTimestamp, targetTz);
             const startHour = cond.start_hour ?? 2;
             const endHour = cond.end_hour ?? 6;
             return hour >= startHour && hour < endHour;
@@ -550,7 +556,8 @@ function buildAlertEmbed(
 
         case "UNUSUAL_HOUR": {
             const fields: Field[] = [...base];
-            fields.push(f("Local Hour", `${new Date().getHours()}:00`));
+            const tz = getTargetTimezone(targetId);
+            fields.push(f("Local Hour", `${getHourInTz(Date.now(), tz)}:00 (${tz})`));
             if (parsed.newStatus) fields.push(f("Status", parsed.newStatus));
             if (parsed.platform)  fields.push(f("Platform", parsed.platform));
             return { title: "Online at Unusual Hour", color, fields, footer, timestamp };
@@ -670,7 +677,7 @@ function generateAlertMessage(
         case "GHOST_TYPES":     return `Target ${targetId} typed but didn't send`;
         case "PROFILE_CHANGE":  return `Target ${targetId} updated their profile`;
         case "NEW_GAME":        return `Target ${targetId} playing new game: ${parsed.name}`;
-        case "UNUSUAL_HOUR":    return `Target ${targetId} online at unusual hour (${new Date().getHours()}:00)`;
+        case "UNUSUAL_HOUR":    return `Target ${targetId} online at unusual hour (${getHourInTz(Date.now(), getTargetTimezone(targetId))}:00 ${getTargetTimezone(targetId)})`;
         case "KEYWORD_MENTION": return `Target ${targetId} mentioned a tracked keyword`;
         default:                return `Alert triggered for ${targetId}: ${rule.rule_type}`;
     }

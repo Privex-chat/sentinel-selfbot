@@ -135,6 +135,19 @@ function applyMigration(version: number): void {
             break;
         }
 
+        case 7: {
+            // Per-target timezone column. Drives every hour/day-of-week analyser
+            // (sleep schedule, routine heatmap, baselines, UNUSUAL_HOUR alert).
+            // Default 'UTC' so existing data continues to be interpreted exactly
+            // as before — operators set per-target tz via $tz or PATCH /api/targets.
+            const db = getDb();
+            try {
+                db.exec("ALTER TABLE targets ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'");
+            } catch { /* column may already exist (idempotent re-run) */ }
+            log.info("Migration v7: targets.timezone column added");
+            break;
+        }
+
         case 6: {
             // Recreate alert_rules with a FK to targets so deleting a target
             // cascades to per-target rules (previously orphaned them) and

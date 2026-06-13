@@ -3,6 +3,8 @@ import { getDb } from "../database/connection";
 import { getStmts } from "../database/queries";
 import { analyzeSleepSchedule } from "./sleep-schedule";
 import { computeZScore, isAnomaly } from "./baseline";
+import { getTargetTimezone } from "../target-lifecycle";
+import { getHourInTz, getDateStrInTz } from "../utils/timezone";
 
 const log = createLogger("AnomalyDetector");
 
@@ -16,6 +18,7 @@ export interface Anomaly {
 
 export function detectAnomalies(targetId: string, days: number = 7): Anomaly[] {
     const stmts = getStmts();
+    const tz = getTargetTimezone(targetId);
     const anomalies: Anomaly[] = [];
     const now = Date.now();
     const since = now - days * 86400000;
@@ -33,7 +36,9 @@ export function detectAnomalies(targetId: string, days: number = 7): Anomaly[] {
             try {
                 const data = JSON.parse(e.data);
                 if (data.newStatus !== "offline") {
-                    const hour = new Date(e.timestamp).getHours();
+                    // Hour-of-day in the target's tz so "online at 3am" reflects
+                    // their local clock, not the host's.
+                    const hour = getHourInTz(e.timestamp, tz);
                     const bedHour = parseInt(sleep.estimatedBedtime!.split(":")[0]);
                     const wakeHour = parseInt(sleep.estimatedWakeTime!.split(":")[0]);
                     let isSleepHour = false;
