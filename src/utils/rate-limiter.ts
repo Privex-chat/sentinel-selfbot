@@ -100,20 +100,31 @@ export async function discordFetch(
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         await rateLimiter.waitForBucket(route);
 
-        const res = await fetch(url, {
-            ...options,
-            headers: {
-                Authorization:        token,
-                "Content-Type":       "application/json",
-                // These headers are required for Discord's undocumented user-account
-                // endpoints (e.g. /users/{id}/profile). Without them Discord returns
-                // 404 even when the selfbot shares mutual servers with the target.
-                "User-Agent":         chosenProfile.browser_user_agent,
-                "X-Super-Properties": superPropertiesHeader,
-                "X-Discord-Locale":   "en-US",
-                ...options.headers,
-            },
-        });
+        let res: Response;
+        try {
+            res = await fetch(url, {
+                ...options,
+                headers: {
+                    Authorization:        token,
+                    "Content-Type":       "application/json",
+                    // These headers are required for Discord's undocumented user-account
+                    // endpoints (e.g. /users/{id}/profile). Without them Discord returns
+                    // 404 even when the selfbot shares mutual servers with the target.
+                    "User-Agent":         chosenProfile.browser_user_agent,
+                    "X-Super-Properties": superPropertiesHeader,
+                    "X-Discord-Locale":   "en-US",
+                    ...options.headers,
+                },
+            });
+        } catch (fetchErr: any) {
+            if (attempt < MAX_RETRIES - 1) {
+                const backoffMs = Math.min(1000 * 2 ** attempt, 30_000); // 1s, 2s, 4s, 8s, 16s
+                log.warn(`Fetch network error on ${route} (attempt ${attempt + 1}/${MAX_RETRIES}): ${fetchErr.message}, retrying in ${backoffMs}ms`);
+                await new Promise(resolve => setTimeout(resolve, backoffMs));
+                continue;
+            }
+            throw fetchErr;
+        }
 
         const headerObj: Record<string, string> = {};
         res.headers.forEach((v, k) => { headerObj[k.toLowerCase()] = v; });

@@ -42,14 +42,23 @@ export class OpenAICompatibleProvider implements AIProvider {
         });
 
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-            const res = await fetch(`${baseUrl}/chat/completions`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${config.aiApiKey}`,
-                },
-                body,
-            });
+            let res: Response;
+            try {
+                res = await fetch(`${baseUrl}/chat/completions`, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${config.aiApiKey}`,
+                    },
+                    body,
+                });
+            } catch (fetchErr: any) {
+                if (attempt === MAX_RETRIES) throw fetchErr;
+                const delayMs = RETRY_BACKOFF_MS[attempt - 1];
+                log.warn(`OpenAI-compatible fetch error (attempt ${attempt}/${MAX_RETRIES}): ${fetchErr.message}, retrying in ${delayMs / 1000}s…`);
+                await sleep(delayMs);
+                continue;
+            }
 
             if (!res.ok) {
                 const text = await res.text().catch(() => "(no body)");
@@ -67,7 +76,15 @@ export class OpenAICompatibleProvider implements AIProvider {
             if (typeof content !== "string") {
                 throw new Error(`Unexpected response structure: ${JSON.stringify(data)}`);
             }
-            return content.trim();
+            const trimmed = content.trim();
+            if (!trimmed) {
+                if (attempt === MAX_RETRIES) throw new Error("OpenAI-compatible API returned empty response text");
+                const delayMs = RETRY_BACKOFF_MS[attempt - 1];
+                log.warn(`OpenAI-compatible empty response (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delayMs / 1000}s…`);
+                await sleep(delayMs);
+                continue;
+            }
+            return trimmed;
         }
 
         const msg = "OpenAI-compatible API: exhausted all retries on transient errors";
@@ -88,15 +105,24 @@ export class AnthropicProvider implements AIProvider {
         });
 
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-            const res = await fetch("https://api.anthropic.com/v1/messages", {
-                method: "POST",
-                headers: {
-                    "x-api-key": config.aiApiKey,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                body,
-            });
+            let res: Response;
+            try {
+                res = await fetch("https://api.anthropic.com/v1/messages", {
+                    method: "POST",
+                    headers: {
+                        "x-api-key": config.aiApiKey,
+                        "anthropic-version": "2023-06-01",
+                        "Content-Type": "application/json",
+                    },
+                    body,
+                });
+            } catch (fetchErr: any) {
+                if (attempt === MAX_RETRIES) throw fetchErr;
+                const delayMs = RETRY_BACKOFF_MS[attempt - 1];
+                log.warn(`Anthropic fetch error (attempt ${attempt}/${MAX_RETRIES}): ${fetchErr.message}, retrying in ${delayMs / 1000}s…`);
+                await sleep(delayMs);
+                continue;
+            }
 
             if (!res.ok) {
                 const text = await res.text().catch(() => "(no body)");
@@ -114,7 +140,15 @@ export class AnthropicProvider implements AIProvider {
             if (typeof content !== "string") {
                 throw new Error(`Unexpected Anthropic response structure: ${JSON.stringify(data)}`);
             }
-            return content.trim();
+            const trimmed = content.trim();
+            if (!trimmed) {
+                if (attempt === MAX_RETRIES) throw new Error("Anthropic returned empty response text");
+                const delayMs = RETRY_BACKOFF_MS[attempt - 1];
+                log.warn(`Anthropic empty response (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delayMs / 1000}s…`);
+                await sleep(delayMs);
+                continue;
+            }
+            return trimmed;
         }
 
         const msg = "Anthropic API: exhausted all retries on transient errors";
@@ -214,11 +248,20 @@ export class GeminiProvider implements AIProvider {
             // Enforce the per-minute rate limit before every attempt
             await geminiRateWait();
 
-            const res = await fetch(url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body,
-            });
+            let res: Response;
+            try {
+                res = await fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body,
+                });
+            } catch (fetchErr: any) {
+                if (attempt === GeminiProvider.MAX_RETRIES) throw fetchErr;
+                const delayMs = RETRY_BACKOFF_MS[attempt - 1];
+                log.warn(`Gemini fetch network error (attempt ${attempt}/${GeminiProvider.MAX_RETRIES}): ${fetchErr.message}, retrying in ${delayMs / 1000}s…`);
+                await sleep(delayMs);
+                continue;
+            }
 
             // ── 429: rate-limited ──────────────────────────────────────────
             if (res.status === 429) {
@@ -281,7 +324,18 @@ export class GeminiProvider implements AIProvider {
                 throw new Error(`Gemini response truncated (MAX_TOKENS) — increase maxTokens`);
             }
             
-            return content.trim();
+            const trimmed = content.trim();
+            if (!trimmed) {
+                if (attempt === GeminiProvider.MAX_RETRIES) {
+                    throw new Error("Gemini returned empty response text");
+                }
+                const delayMs = RETRY_BACKOFF_MS[attempt - 1];
+                log.warn(`Gemini returned empty response (attempt ${attempt}/${GeminiProvider.MAX_RETRIES}), retrying in ${delayMs / 1000}s…`);
+                await sleep(delayMs);
+                continue;
+            }
+
+            return trimmed;
         }
 
         const msg = "Gemini API: exhausted all retries on transient errors";
