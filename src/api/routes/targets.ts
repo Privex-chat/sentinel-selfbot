@@ -5,8 +5,7 @@ import { config } from "../../utils/config";
 import { isValidTimezone } from "../../utils/timezone";
 import { startBackfillForTarget } from "../../backfill/backfill-engine";
 import { requestPresenceForUser } from "../../pollers/status-poller";
-import { bootstrapTargetNow } from "../../pollers/target-profile-poller";
-import { onTargetRemoved, refreshTargetCache, markBootstrapComplete } from "../../target-lifecycle";
+import { onTargetRemoved, refreshTargetCache, markBootstrapComplete, BOOTSTRAP_GRACE_MS } from "../../target-lifecycle";
 
 // How long to wait after adding a target before kicking off the backfill.
 // Adding a target already triggers a profile fetch for mutual guilds — doing
@@ -58,16 +57,14 @@ export function registerTargetRoutes(app: FastifyInstance): void {
             return reply.code(400).send({ error: "priority must be a non-negative integer" });
         }
         const stmts = getStmts();
-        stmts.insertTarget.run(userId, Date.now(), label || null, notes || null, priorityVal, 1, tz);
+        const now = Date.now();
+        // Time-based onboarding grace window. The target is operational at
+        // `now + BOOTSTRAP_GRACE_MS`; until then isBootstrapping() returns
+        // true and the alerts engine + anomaly detector + profile-event
+        // emission all suppress for this target. Predictable, fetch-independent,
+        // can never get stuck.
+        stmts.insertTarget.run(userId, now, label || null, notes || null, priorityVal, 1, tz, now + BOOTSTRAP_GRACE_MS);
         refreshTargetCache();
-
-        // Kick off an immediate profile fetch so the target flips from
-        // bootstrap → operational within seconds rather than waiting up to
-        // PROFILE_POLL_INTERVAL_MS (default 5 min) for the next cycle. While
-        // bootstrap is pending, profile/avatar/username events stay suppressed
-        // and the alerts engine + anomaly detector early-return for this
-        // target — see architecture.md "Target onboarding pipeline".
-        bootstrapTargetNow(userId);
 
         if (config.backfillEnabled) {
             // Delay the backfill start so the profile fetch triggered by the

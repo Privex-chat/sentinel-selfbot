@@ -10,7 +10,7 @@ function prepareStatements() {
     return {
         // ── Targets ────────────────────────────────────────────────────────────
         insertTarget: db.prepare(
-            "INSERT OR IGNORE INTO targets (user_id, added_at, label, notes, priority, active, timezone) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT OR IGNORE INTO targets (user_id, added_at, label, notes, priority, active, timezone, bootstrap_completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         ),
         getTarget: db.prepare("SELECT * FROM targets WHERE user_id = ?"),
         getAllTargets: db.prepare("SELECT * FROM targets"),
@@ -34,17 +34,11 @@ function prepareStatements() {
         deleteTarget: db.prepare("DELETE FROM targets WHERE user_id = ?"),
 
         // ── Bootstrap state (schema v8) ────────────────────────────────────────
-        // Mark a target as operational. Idempotent — already-set rows keep their
-        // original timestamp because of the `IS NULL` guard, so a duplicate
-        // bootstrapTargetNow() call won't reset the operational clock.
+        // Force-complete a target's grace window. Idempotency lives in
+        // markBootstrapComplete (target-lifecycle.ts) — the SQL itself just
+        // sets the column.
         completeBootstrap: db.prepare(
-            "UPDATE targets SET bootstrap_completed_at = ? WHERE user_id = ? AND bootstrap_completed_at IS NULL"
-        ),
-        // Backstop: force-complete every target that's been stuck in bootstrap
-        // longer than the supplied cutoff. Returns the number of rows updated
-        // via RunResult.changes — the caller logs a warn per sweep.
-        forceCompleteStuckBootstraps: db.prepare(
-            "UPDATE targets SET bootstrap_completed_at = ? WHERE bootstrap_completed_at IS NULL AND added_at < ?"
+            "UPDATE targets SET bootstrap_completed_at = ? WHERE user_id = ?"
         ),
         // Single-target read used by the API status endpoint + cache rehydrate.
         getBootstrapCompletedAt: db.prepare(

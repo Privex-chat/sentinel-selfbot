@@ -65,14 +65,17 @@ describe("bootstrap cache", () => {
         insertTestTarget(TARGET_A, { bootstrap: "pending" });
         refreshTargetCache();
         assert.equal(isBootstrapping(TARGET_A), true);
-        assert.equal(getBootstrapCompletedAt(TARGET_A), null);
+        // Pending = future timestamp (test helper uses now + 5 min)
+        const v = getBootstrapCompletedAt(TARGET_A);
+        assert.ok(v != null && v > Date.now(), "pending bootstrap_completed_at must be a future timestamp");
     });
 
     it("isBootstrapping returns false for a bootstrap=complete row", () => {
         insertTestTarget(TARGET_A, { bootstrap: "complete" });
         refreshTargetCache();
         assert.equal(isBootstrapping(TARGET_A), false);
-        assert.notEqual(getBootstrapCompletedAt(TARGET_A), null);
+        const v = getBootstrapCompletedAt(TARGET_A);
+        assert.ok(v != null && v <= Date.now(), "complete bootstrap_completed_at must be in the past");
     });
 
     it("isBootstrapping returns true for unknown user ids (defensive)", () => {
@@ -81,7 +84,7 @@ describe("bootstrap cache", () => {
         assert.equal(isBootstrapping("999999999999999999"), true);
     });
 
-    it("markBootstrapComplete flips a pending target and is idempotent", () => {
+    it("markBootstrapComplete force-completes a pending target and is idempotent", () => {
         insertTestTarget(TARGET_A, { bootstrap: "pending" });
         refreshTargetCache();
         assert.equal(isBootstrapping(TARGET_A), true);
@@ -89,12 +92,11 @@ describe("bootstrap cache", () => {
         const firstFlip = markBootstrapComplete(TARGET_A);
         assert.equal(firstFlip, true);
         assert.equal(isBootstrapping(TARGET_A), false);
-        const firstTimestamp = getBootstrapCompletedAt(TARGET_A);
 
-        // Second call should be a no-op — same timestamp preserved.
+        // Second call should be a no-op — target is already operational.
         const secondFlip = markBootstrapComplete(TARGET_A);
         assert.equal(secondFlip, false);
-        assert.equal(getBootstrapCompletedAt(TARGET_A), firstTimestamp);
+        assert.equal(isBootstrapping(TARGET_A), false);
     });
 
     it("default insertTestTarget produces an operational target (back-compat for old tests)", () => {

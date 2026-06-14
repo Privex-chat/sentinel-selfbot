@@ -91,38 +91,6 @@ function startHeartbeatLogger(): void {
  *
  * Uses a fixed cap (not "now") so the bounded session doesn't grow each tick.
  */
-/**
- * Force-complete any target stuck in the onboarding bootstrap phase for too
- * long. Normally bootstrapTargetNow() (called from $add and POST /api/targets)
- * flips a fresh target to operational within seconds; the periodic profile
- * poller covers the case where that immediate fetch failed but a later cycle
- * succeeds. This backstop catches the third case — neither the immediate
- * fetch nor any subsequent poll succeeded within 30 min — by force-completing
- * so the target never gets stuck in a "no alerts ever" limbo.
- *
- * The 30-min cutoff is comfortable: PROFILE_POLL_INTERVAL_MS defaults to 5
- * min, so a healthy target sees 5–6 attempts before this sweeps. A target
- * caught here is almost always one with no mutual guilds AND the basic
- * /users/{id} endpoint also failing — worth investigating via the warn log.
- */
-function closeStuckBootstraps(): void {
-    const STUCK_AGE_MS = 30 * 60_000;
-    const cutoff = Date.now() - STUCK_AGE_MS;
-    const stmts = getStmts();
-    const result = stmts.forceCompleteStuckBootstraps.run(Date.now(), cutoff);
-    if (result.changes > 0) {
-        // Force-complete touched the DB but the in-memory cache is stale —
-        // refresh so isBootstrapping() reflects the new operational state.
-        refreshTargetCache();
-        log.warn(
-            `Stuck-bootstrap sweep force-completed ${result.changes} target(s). ` +
-            `Most likely cause: no mutual guilds AND basic /users/{id} endpoint failing. ` +
-            `Profile data may be incomplete for these targets — investigate via the ` +
-            `target-profile-poller failure counters.`
-        );
-    }
-}
-
 function closeAbandonedOpenSessions(): void {
     const db = getDb();
     const ABANDON_AGE_MS = 48 * 60 * 60 * 1000;
@@ -777,8 +745,6 @@ async function main(): Promise<void> {
         catch (err: any) { log.error(`Alert fire count reset error: ${err.message}`); }
         try { closeAbandonedOpenSessions(); }
         catch (err: any) { log.error(`Abandoned-session sweep error: ${err.message}`); }
-        try { closeStuckBootstraps(); }
-        catch (err: any) { log.error(`Stuck-bootstrap sweep error: ${err.message}`); }
     }, withJitter(config.dailySummaryIntervalMs));
 
     setTimeout(() => {

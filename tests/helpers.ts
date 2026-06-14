@@ -35,10 +35,13 @@ export function teardownTestDb(): void {
 
 /** Insert a target row directly into the in-memory DB.
  *
- * `bootstrap`: when omitted (default) the target is inserted as already-
- * operational so existing tests that pre-date the bootstrap pipeline don't
- * accidentally trip the new suppression logic. Pass `"pending"` to test the
- * bootstrap-in-progress path. */
+ * `bootstrap`: time-based grace window per Issue 1 redesign.
+ *   - "complete" (default) → bootstrap_completed_at = now - 1 (in the past,
+ *     already operational). Back-compat for tests that don't care about
+ *     onboarding suppression.
+ *   - "pending"            → bootstrap_completed_at = now + 5 min (in the
+ *     future, well past any realistic test duration). isBootstrapping()
+ *     returns true throughout the test. */
 export function insertTestTarget(
     userId: string,
     opts: {
@@ -50,6 +53,9 @@ export function insertTestTarget(
 ): void {
     const db = getDb();
     const now = Date.now();
+    const bootstrapAt = opts.bootstrap === "pending"
+        ? now + 5 * 60_000   // far in the future for the test's lifetime
+        : now - 1;           // in the past — already operational
     db.prepare(
         "INSERT OR REPLACE INTO targets (user_id, added_at, label, notes, priority, active, timezone, bootstrap_completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     ).run(
@@ -60,6 +66,6 @@ export function insertTestTarget(
         0,
         opts.active === false ? 0 : 1,
         opts.timezone ?? "UTC",
-        opts.bootstrap === "pending" ? null : now,
+        bootstrapAt,
     );
 }

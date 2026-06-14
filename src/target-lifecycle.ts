@@ -17,6 +17,21 @@
 import { createLogger } from "./utils/logger";
 import { getStmts } from "./database/queries";
 import { removeTargetState as removeFromPresence } from "./collectors/presence";
+
+/** How long after `$add` / POST /api/targets the target stays in the grace
+ *  window. Alerts + anomaly surfacing are suppressed for this duration so the
+ *  first wave of initial-observation events doesn't reach the operator as
+ *  noise. 60 s is the sweet spot:
+ *    - REST profile fetch (~1 s) lands inside it
+ *    - REQUEST_GUILD_MEMBERS + the resulting CHUNK (~5-10 s) lands inside it
+ *    - Initial PRESENCE_UPDATE for an online target (~1-5 s) lands inside it
+ *    - Backfill kicks off at 90 s, AFTER the grace expires — so backfilled
+ *      messages flow as normal MESSAGE_CREATE events from second 91 onwards
+ *
+ *  Operators can flip a target out of the grace window early via
+ *  POST /api/targets/:userId/bootstrap/complete or the "Skip wait" UI button.
+ */
+export const BOOTSTRAP_GRACE_MS = 60_000;
 import { removeTargetState as removeFromActivity } from "./collectors/activity";
 import { removeTargetState as removeFromVoice } from "./collectors/voice";
 import { removeTargetState as removeFromTyping } from "./collectors/typing";
@@ -52,13 +67,24 @@ const activeTargetSet = new Set<string>();
 const targetTimezones = new Map<string, string>();
 
 // Per-target bootstrap completion timestamp. Mirrors targets.bootstrap_completed_at.
-//   null  = still bootstrapping (alerts + anomalies suppressed)
-//   number = operational since that epoch ms
 //
-// Read by alerts/engine.ts:evaluateEvent (early-return when bootstrapping),
-// collectors/profile.ts:handleProfileUpdate (suppress events when bootstrapping),
-// analyzers/anomaly-detector.ts (clamp `since` to this value).
-// Refreshed by refreshTargetCache + writes via markBootstrapComplete.
+// Semantics — TIME-BASED grace window, NOT fetch-dependent:
+//   null     = legacy / unknown target → treat as bootstrapping (defensive)
+//   future N = target is bootstrapping until N (epoch ms). isBootstrapping
+//              returns true while N > Date.now(), false once time has passed it.
+//   past N   = target became operational at N (epoch ms). Always operational
+//              from now on.
+//
+// This is intentional: the previous design (null until profile fetch succeeds)
+// could get a target stuck in bootstrap forever if discordFetch failed and the
+// 30-min sweep hadn't run yet. Time-based grace makes "is this target
+// operational" purely a function of (added_at + grace) vs now — predictable,
+// can never get stuck, and no Discord round-trip is required.
+//
+// New targets get `bootstrap_completed_at = Date.now() + BOOTSTRAP_GRACE_MS`
+// at INSERT time. Existing targets are migrated to `added_at` (already past,
+// already operational). Force-complete sets it to `Date.now() - 1` to flip
+// instantly.
 const targetBootstrapAt = new Map<string, number | null>();
 
 export function refreshTargetCache(): void {
@@ -111,35 +137,37 @@ export function getBootstrapCompletedAt(targetId: string): number | null {
     return targetBootstrapAt.get(targetId) ?? null;
 }
 
-/** True when the target's onboarding bootstrap is still in progress (or the
+/** True when the target's onboarding grace window has not yet elapsed (or the
  *  target isn't in the cache at all). While true:
  *    • PROFILE_UPDATE / AVATAR_CHANGE / USERNAME_CHANGE events are suppressed
  *    • alerts/engine.ts:evaluateEvent early-returns
  *    • analyzers/anomaly-detector.ts returns an empty array
- *  See architecture.md "Target onboarding pipeline". */
+ *
+ *  Time-based, so the answer "flips" automatically when the grace window
+ *  expires — no Discord round-trip, no DB write, no completion event needed. */
 export function isBootstrapping(targetId: string): boolean {
-    return targetBootstrapAt.get(targetId) == null;
+    const v = targetBootstrapAt.get(targetId);
+    if (v == null) return true;
+    return v > Date.now();
 }
 
-/** Persist bootstrap completion + update the in-memory cache atomically.
- *  Idempotent — re-marking an already-operational target is a no-op (the SQL
- *  guard `AND bootstrap_completed_at IS NULL` keeps the original timestamp).
- *  Returns true when this call actually flipped the target, false when it was
- *  already operational. */
-export function markBootstrapComplete(targetId: string, timestamp = Date.now()): boolean {
-    const result = getStmts().completeBootstrap.run(timestamp, targetId);
-    if (result.changes === 0) {
-        // Already operational. Make sure the cache reflects whatever the DB
-        // currently holds (defensive against split-brain after a manual SQL
-        // edit) — and report no change so callers don't double-log.
-        const row = getStmts().getBootstrapCompletedAt.get(targetId) as { bootstrap_completed_at: number | null } | undefined;
-        if (row && row.bootstrap_completed_at != null) {
-            targetBootstrapAt.set(targetId, row.bootstrap_completed_at);
-        }
+/** Force-complete an in-progress bootstrap. Sets bootstrap_completed_at to
+ *  `Date.now() - 1` so isBootstrapping flips false immediately. Used by the
+ *  operator "Skip wait" button. Idempotent — already-operational targets are
+ *  left alone. Returns true when this call actually flipped the target. */
+export function markBootstrapComplete(targetId: string, timestamp = Date.now() - 1): boolean {
+    const existing = targetBootstrapAt.get(targetId);
+    // Already operational? leave it.
+    if (existing != null && existing <= Date.now()) {
+        return false;
+    }
+    const stmtResult = getStmts().completeBootstrap.run(timestamp, targetId);
+    if (stmtResult.changes === 0) {
+        // Target row missing — bail.
         return false;
     }
     targetBootstrapAt.set(targetId, timestamp);
-    log.info(`Target ${targetId} bootstrap complete — alerts + anomalies now active`);
+    log.info(`Target ${targetId} grace window force-completed — alerts + anomalies now active`);
     return true;
 }
 
