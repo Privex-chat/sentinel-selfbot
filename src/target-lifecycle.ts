@@ -51,21 +51,39 @@ const activeTargetSet = new Set<string>();
 // the operator-set timezone.
 const targetTimezones = new Map<string, string>();
 
+// Per-target bootstrap completion timestamp. Mirrors targets.bootstrap_completed_at.
+//   null  = still bootstrapping (alerts + anomalies suppressed)
+//   number = operational since that epoch ms
+//
+// Read by alerts/engine.ts:evaluateEvent (early-return when bootstrapping),
+// collectors/profile.ts:handleProfileUpdate (suppress events when bootstrapping),
+// analyzers/anomaly-detector.ts (clamp `since` to this value).
+// Refreshed by refreshTargetCache + writes via markBootstrapComplete.
+const targetBootstrapAt = new Map<string, number | null>();
+
 export function refreshTargetCache(): void {
     try {
         // SELECT both active + paused: timezone applies to analytics regardless of active state.
-        const activeRows = getStmts().getActiveTargets.all() as Array<{ user_id: string; timezone?: string }>;
-        const allRows    = getStmts().getAllTargets.all()    as Array<{ user_id: string; timezone?: string }>;
+        const activeRows = getStmts().getActiveTargets.all() as Array<{ user_id: string; timezone?: string; bootstrap_completed_at?: number | null }>;
+        const allRows    = getStmts().getAllTargets.all()    as Array<{ user_id: string; timezone?: string; bootstrap_completed_at?: number | null }>;
 
         activeTargetSet.clear();
         for (const row of activeRows) activeTargetSet.add(row.user_id);
 
         targetTimezones.clear();
+        targetBootstrapAt.clear();
         for (const row of allRows) {
             targetTimezones.set(row.user_id, row.timezone || "UTC");
+            // SQLite stores NULL → JS undefined; normalise to null so the
+            // isBootstrapping check has a stable falsy sentinel.
+            targetBootstrapAt.set(
+                row.user_id,
+                row.bootstrap_completed_at == null ? null : row.bootstrap_completed_at,
+            );
         }
 
-        log.debug(`Target cache refreshed (${activeTargetSet.size} active, ${targetTimezones.size} total)`);
+        const bootstrapping = [...targetBootstrapAt.values()].filter(v => v == null).length;
+        log.debug(`Target cache refreshed (${activeTargetSet.size} active, ${targetTimezones.size} total, ${bootstrapping} bootstrapping)`);
     } catch (err: any) {
         log.warn(`Target cache refresh failed: ${err.message}`);
     }
@@ -83,6 +101,46 @@ export function getActiveTargetCount(): number {
  *  never blow up on a missing row mid-removal. */
 export function getTargetTimezone(targetId: string): string {
     return targetTimezones.get(targetId) ?? "UTC";
+}
+
+/** Epoch ms when the target finished its onboarding bootstrap, or null when
+ *  bootstrap is still pending. Unknown targets get `null` (treated as
+ *  bootstrapping) so a race between target-removal and a tail event suppresses
+ *  rather than fires alerts. */
+export function getBootstrapCompletedAt(targetId: string): number | null {
+    return targetBootstrapAt.get(targetId) ?? null;
+}
+
+/** True when the target's onboarding bootstrap is still in progress (or the
+ *  target isn't in the cache at all). While true:
+ *    • PROFILE_UPDATE / AVATAR_CHANGE / USERNAME_CHANGE events are suppressed
+ *    • alerts/engine.ts:evaluateEvent early-returns
+ *    • analyzers/anomaly-detector.ts returns an empty array
+ *  See architecture.md "Target onboarding pipeline". */
+export function isBootstrapping(targetId: string): boolean {
+    return targetBootstrapAt.get(targetId) == null;
+}
+
+/** Persist bootstrap completion + update the in-memory cache atomically.
+ *  Idempotent — re-marking an already-operational target is a no-op (the SQL
+ *  guard `AND bootstrap_completed_at IS NULL` keeps the original timestamp).
+ *  Returns true when this call actually flipped the target, false when it was
+ *  already operational. */
+export function markBootstrapComplete(targetId: string, timestamp = Date.now()): boolean {
+    const result = getStmts().completeBootstrap.run(timestamp, targetId);
+    if (result.changes === 0) {
+        // Already operational. Make sure the cache reflects whatever the DB
+        // currently holds (defensive against split-brain after a manual SQL
+        // edit) — and report no change so callers don't double-log.
+        const row = getStmts().getBootstrapCompletedAt.get(targetId) as { bootstrap_completed_at: number | null } | undefined;
+        if (row && row.bootstrap_completed_at != null) {
+            targetBootstrapAt.set(targetId, row.bootstrap_completed_at);
+        }
+        return false;
+    }
+    targetBootstrapAt.set(targetId, timestamp);
+    log.info(`Target ${targetId} bootstrap complete — alerts + anomalies now active`);
+    return true;
 }
 
 // ── Lifecycle cleanup ────────────────────────────────────────────────────────
@@ -106,5 +164,6 @@ export function onTargetRemoved(userId: string): void {
     // when several deletes land in close succession.
     activeTargetSet.delete(userId);
     targetTimezones.delete(userId);
+    targetBootstrapAt.delete(userId);
     log.debug(`In-memory state cleared for target ${userId}`);
 }

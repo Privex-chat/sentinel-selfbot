@@ -13,6 +13,9 @@ import {
     getTargetTimezone,
     getActiveTargetCount,
     onTargetRemoved,
+    isBootstrapping,
+    getBootstrapCompletedAt,
+    markBootstrapComplete,
 } from "../src/target-lifecycle";
 
 const TARGET_A = "111111111111111111";
@@ -49,6 +52,64 @@ describe("target-lifecycle cache", () => {
         insertTestTarget(TARGET_A, { timezone: "America/Chicago" });
         refreshTargetCache();
         assert.equal(getTargetTimezone(TARGET_A), "America/Chicago");
+    });
+});
+
+describe("bootstrap cache", () => {
+    beforeEach(() => {
+        setupTestDb();
+    });
+    afterEach(teardownTestDb);
+
+    it("isBootstrapping returns true for a freshly inserted bootstrap=pending row", () => {
+        insertTestTarget(TARGET_A, { bootstrap: "pending" });
+        refreshTargetCache();
+        assert.equal(isBootstrapping(TARGET_A), true);
+        assert.equal(getBootstrapCompletedAt(TARGET_A), null);
+    });
+
+    it("isBootstrapping returns false for a bootstrap=complete row", () => {
+        insertTestTarget(TARGET_A, { bootstrap: "complete" });
+        refreshTargetCache();
+        assert.equal(isBootstrapping(TARGET_A), false);
+        assert.notEqual(getBootstrapCompletedAt(TARGET_A), null);
+    });
+
+    it("isBootstrapping returns true for unknown user ids (defensive)", () => {
+        // Targets the cache hasn't seen yet are treated as bootstrapping so
+        // tail events during target-removal races suppress rather than fire.
+        assert.equal(isBootstrapping("999999999999999999"), true);
+    });
+
+    it("markBootstrapComplete flips a pending target and is idempotent", () => {
+        insertTestTarget(TARGET_A, { bootstrap: "pending" });
+        refreshTargetCache();
+        assert.equal(isBootstrapping(TARGET_A), true);
+
+        const firstFlip = markBootstrapComplete(TARGET_A);
+        assert.equal(firstFlip, true);
+        assert.equal(isBootstrapping(TARGET_A), false);
+        const firstTimestamp = getBootstrapCompletedAt(TARGET_A);
+
+        // Second call should be a no-op — same timestamp preserved.
+        const secondFlip = markBootstrapComplete(TARGET_A);
+        assert.equal(secondFlip, false);
+        assert.equal(getBootstrapCompletedAt(TARGET_A), firstTimestamp);
+    });
+
+    it("default insertTestTarget produces an operational target (back-compat for old tests)", () => {
+        insertTestTarget(TARGET_A);
+        refreshTargetCache();
+        assert.equal(isBootstrapping(TARGET_A), false);
+    });
+
+    it("onTargetRemoved clears bootstrap state too", () => {
+        insertTestTarget(TARGET_A, { bootstrap: "pending" });
+        refreshTargetCache();
+        onTargetRemoved(TARGET_A);
+        // After removal the cache no longer has the user — defensive bootstrapping=true
+        assert.equal(isBootstrapping(TARGET_A), true);
+        assert.equal(getBootstrapCompletedAt(TARGET_A), null);
     });
 });
 

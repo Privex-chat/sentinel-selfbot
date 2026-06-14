@@ -38,6 +38,7 @@ import { getStmts } from "../database/queries";
 import { handleProfileUpdate } from "../collectors/profile";
 import { pushSSEEvent } from "../api/routes/events";
 import { notifyCriticalError } from "../utils/webhook-notifier";
+import { isBootstrapping, markBootstrapComplete } from "../target-lifecycle";
 
 const log = createLogger("TargetProfilePoller");
 
@@ -247,8 +248,18 @@ function runConnectedAccountsDiff(targetId: string, data: any): void {
 
 // ── Single-target poll ────────────────────────────────────────────────────────
 
-async function pollTarget(targetId: string): Promise<void> {
-    if (!shouldPoll(targetId)) {
+/**
+ * Run the per-target profile poll. `skipFailureBackoff` is used by the
+ * immediate post-`$add` `bootstrapTargetNow()` path so a brand-new target
+ * doesn't accidentally inherit a cooldown from a previous tenant of the
+ * same userId — outside that path the regular backoff still applies.
+ *
+ * Side effect on success: if the target is still in the onboarding
+ * bootstrap phase, flips them to operational via markBootstrapComplete().
+ * That unsuppresses alerts + anomalies for the next event.
+ */
+async function pollTarget(targetId: string, opts: { skipFailureBackoff?: boolean } = {}): Promise<void> {
+    if (!opts.skipFailureBackoff && !shouldPoll(targetId)) {
         log.debug(`${targetId}: in failure backoff — skipping this cycle`);
         return;
     }
@@ -274,6 +285,7 @@ async function pollTarget(targetId: string): Promise<void> {
             // the existing snapshot's connected_accounts and mutual_guilds.
             handleProfileUpdate(targetId, userData, undefined, undefined, undefined);
             recordSuccess(targetId);
+            completeBootstrapIfPending(targetId, "basic /users fallback");
             return;
         }
 
@@ -293,8 +305,19 @@ async function pollTarget(targetId: string): Promise<void> {
         runConnectedAccountsDiff(targetId, data);
 
         recordSuccess(targetId);
+        completeBootstrapIfPending(targetId, "full profile fetch");
     } catch (err: any) {
         recordFailure(targetId, err.message);
+    }
+}
+
+/** Promote the target from bootstrap → operational once a profile fetch
+ *  (full or basic-fallback) has actually landed. Idempotent. */
+function completeBootstrapIfPending(targetId: string, source: string): void {
+    if (!isBootstrapping(targetId)) return;
+    const flipped = markBootstrapComplete(targetId);
+    if (flipped) {
+        log.info(`${targetId}: onboarding bootstrap complete via ${source}`);
     }
 }
 
@@ -351,6 +374,27 @@ export function stopTargetProfilePoller(): void {
         intervalHandle = null;
     }
     log.info("Target-profile poller stopped");
+}
+
+/**
+ * Run one immediate profile fetch for a newly-added target, outside the regular
+ * cycle. Used by `POST /api/targets` and `$add` so a fresh target lands in
+ * operational mode within seconds rather than waiting up to PROFILE_POLL_INTERVAL_MS
+ * for the next cycle to complete its bootstrap.
+ *
+ * Fire-and-forget — the caller doesn't await. Errors are swallowed and logged
+ * (the recurring poll plus the 30-min stuck-bootstrap sweep will still
+ * complete the target eventually if this immediate attempt fails).
+ *
+ * Failure backoff is skipped because a brand-new target can't be in backoff
+ * yet from this process — and if the userId was previously tracked + removed
+ * + re-added, the previous run's failure counter shouldn't gate the new add.
+ */
+export function bootstrapTargetNow(targetId: string): void {
+    log.info(`${targetId}: running immediate bootstrap profile fetch`);
+    pollTarget(targetId, { skipFailureBackoff: true }).catch(err => {
+        log.warn(`Immediate bootstrap profile fetch failed for ${targetId}: ${err?.message ?? err}`);
+    });
 }
 
 /** Drop every per-target cache and failure-tracking entry for this target.

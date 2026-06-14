@@ -33,18 +33,33 @@ export function teardownTestDb(): void {
     resetStmts();
 }
 
-/** Insert a target row directly into the in-memory DB. */
-export function insertTestTarget(userId: string, opts: { active?: boolean; timezone?: string; label?: string } = {}): void {
+/** Insert a target row directly into the in-memory DB.
+ *
+ * `bootstrap`: when omitted (default) the target is inserted as already-
+ * operational so existing tests that pre-date the bootstrap pipeline don't
+ * accidentally trip the new suppression logic. Pass `"pending"` to test the
+ * bootstrap-in-progress path. */
+export function insertTestTarget(
+    userId: string,
+    opts: {
+        active?: boolean;
+        timezone?: string;
+        label?: string;
+        bootstrap?: "complete" | "pending";
+    } = {},
+): void {
     const db = getDb();
+    const now = Date.now();
     db.prepare(
-        "INSERT OR REPLACE INTO targets (user_id, added_at, label, notes, priority, active, timezone) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT OR REPLACE INTO targets (user_id, added_at, label, notes, priority, active, timezone, bootstrap_completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     ).run(
         userId,
-        Date.now(),
+        now,
         opts.label ?? null,
         null,
         0,
         opts.active === false ? 0 : 1,
         opts.timezone ?? "UTC",
+        opts.bootstrap === "pending" ? null : now,
     );
 }

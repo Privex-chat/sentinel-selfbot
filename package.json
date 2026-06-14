@@ -7,7 +7,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "test": "node --import tsx --test tests/utils/timezone.test.ts tests/utils/like-escape.test.ts tests/ai/json-extract.test.ts tests/runtime-config.test.ts tests/alerts/engine.test.ts tests/target-lifecycle.test.ts"
+    "test": "node --import tsx --test tests/utils/timezone.test.ts tests/utils/like-escape.test.ts tests/ai/json-extract.test.ts tests/runtime-config.test.ts tests/alerts/engine.test.ts tests/target-lifecycle.test.ts tests/collectors/profile.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.2",

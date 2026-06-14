@@ -29,29 +29,40 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS public.targets (
-    user_id  TEXT    PRIMARY KEY,
-    added_at BIGINT  NOT NULL,
-    label    TEXT,
-    notes    TEXT,
-    priority INTEGER NOT NULL DEFAULT 0,
-    active   INTEGER NOT NULL DEFAULT 1,
-    timezone TEXT    NOT NULL DEFAULT 'UTC',
+    user_id                TEXT    PRIMARY KEY,
+    added_at               BIGINT  NOT NULL,
+    label                  TEXT,
+    notes                  TEXT,
+    priority               INTEGER NOT NULL DEFAULT 0,
+    active                 INTEGER NOT NULL DEFAULT 1,
+    timezone               TEXT    NOT NULL DEFAULT 'UTC',
+    bootstrap_completed_at BIGINT,
 
     CONSTRAINT targets_priority_non_negative CHECK (priority >= 0),
     CONSTRAINT targets_active_bool           CHECK (active IN (0, 1))
 );
 
--- Idempotent column add for existing Supabase deployments that pre-date the
--- selfbot's schema v7. Runs harmlessly on fresh installs where the column was
--- already defined above.
+-- Idempotent column adds for existing Supabase deployments that pre-date the
+-- selfbot's schema migrations. Run harmlessly on fresh installs where the
+-- columns were already defined above.
 ALTER TABLE public.targets
     ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC';
+ALTER TABLE public.targets
+    ADD COLUMN IF NOT EXISTS bootstrap_completed_at BIGINT;
 
-COMMENT ON TABLE  public.targets            IS 'Tracked Discord user accounts.';
-COMMENT ON COLUMN public.targets.user_id    IS 'Discord snowflake ID (17-20 digit string).';
-COMMENT ON COLUMN public.targets.added_at   IS 'Unix epoch ms when the target was added.';
-COMMENT ON COLUMN public.targets.active     IS '1 = actively tracked, 0 = paused.';
-COMMENT ON COLUMN public.targets.timezone   IS 'IANA timezone identifier (e.g. America/New_York). Defaults to UTC. Drives every per-target hour/day analyser.';
+-- Existing targets are operational by definition — set bootstrap_completed_at
+-- to added_at on first migration so they don't get accidentally locked into
+-- the new bootstrap-suppression flow.
+UPDATE public.targets
+    SET bootstrap_completed_at = added_at
+    WHERE bootstrap_completed_at IS NULL;
+
+COMMENT ON TABLE  public.targets                        IS 'Tracked Discord user accounts.';
+COMMENT ON COLUMN public.targets.user_id                IS 'Discord snowflake ID (17-20 digit string).';
+COMMENT ON COLUMN public.targets.added_at               IS 'Unix epoch ms when the target was added.';
+COMMENT ON COLUMN public.targets.active                 IS '1 = actively tracked, 0 = paused.';
+COMMENT ON COLUMN public.targets.timezone               IS 'IANA timezone identifier (e.g. America/New_York). Defaults to UTC. Drives every per-target hour/day analyser.';
+COMMENT ON COLUMN public.targets.bootstrap_completed_at IS 'Unix epoch ms when the first profile fetch landed. NULL = bootstrap pending (alerts + anomalies suppressed for this target). Set on first successful profile poll. Operator can force-complete via POST /api/targets/:userId/bootstrap/complete.';
 
 
 -- =============================================================================

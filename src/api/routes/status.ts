@@ -6,6 +6,7 @@ import { getCurrentActivities } from "../../collectors/activity";
 import { getCurrentVoiceState } from "../../collectors/voice";
 import { generateBriefForTarget } from "../../briefs/brief-generator";
 import { escapeLikePattern } from "../../utils/like-escape";
+import { isBootstrapping } from "../../target-lifecycle";
 
 const startTime = Date.now();
 
@@ -37,7 +38,17 @@ export function registerStatusRoutes(app: FastifyInstance): void {
         const target = stmts.getTarget.get(userId);
         const latestSnapshot = stmts.getLatestSnapshot.get(userId);
 
-        return { target, presence: presence || null, activities, voiceState: voiceState || null, profile: latestSnapshot || null };
+        return {
+            target,
+            presence: presence || null,
+            activities,
+            voiceState: voiceState || null,
+            profile: latestSnapshot || null,
+            // Derived from the in-memory bootstrap cache (mirrors
+            // targets.bootstrap_completed_at). True while alerts and anomaly
+            // surfacing for this target are suppressed during onboarding.
+            isBootstrapping: isBootstrapping(userId),
+        };
     });
 
     // Messages routes

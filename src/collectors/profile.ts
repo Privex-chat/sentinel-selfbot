@@ -2,6 +2,7 @@ import { createLogger } from "../utils/logger";
 import { getStmts } from "../database/queries";
 import { evaluateEvent } from "../alerts/engine";
 import { pushSSEEvent } from "../api/routes/events";
+import { isBootstrapping } from "../target-lifecycle";
 
 const log = createLogger("Profile");
 
@@ -31,15 +32,37 @@ export function handleProfileUpdate(targetId: string, userData: any, profileData
         ? JSON.stringify(mutualGuilds)
         : (lastSnapshot?.mutual_guilds ?? null);
 
+    // Every field comparison requires BOTH the old and the new value to be
+    // non-null before it counts as a change. A `null → value` transition is
+    // the signature of an incomplete first observation (GUILD_MEMBERS_CHUNK
+    // gives us the basic user object without bio/pronouns/banner; the full
+    // /users/{id}/profile fills those in on the next poll). Treating that as
+    // a real change produced phantom PROFILE_UPDATE events on every onboarding
+    // and after every snapshot DB restore — closed permanently here. The
+    // bootstrap suppression in handleProfileUpdate is belt-and-suspenders.
     const changes: string[] = [];
     if (lastSnapshot) {
-        if (lastSnapshot.username !== username && username) changes.push(`username: ${lastSnapshot.username} -> ${username}`);
-        if (lastSnapshot.global_name !== globalName) changes.push(`displayName: ${lastSnapshot.global_name} -> ${globalName}`);
-        if (lastSnapshot.avatar_hash !== avatarHash) changes.push("avatar changed");
-        if (lastSnapshot.banner_hash !== bannerHash && bannerHash !== null) changes.push("banner changed");
-        if (lastSnapshot.bio !== bio && bio !== null) changes.push("bio changed");
-        if (lastSnapshot.pronouns !== pronouns && pronouns !== null) changes.push(`pronouns: ${lastSnapshot.pronouns} -> ${pronouns}`);
-        if (lastSnapshot.discriminator !== discriminator && discriminator) changes.push(`discriminator: ${lastSnapshot.discriminator} -> ${discriminator}`);
+        if (lastSnapshot.username && username && lastSnapshot.username !== username) {
+            changes.push(`username: ${lastSnapshot.username} -> ${username}`);
+        }
+        if (lastSnapshot.global_name && globalName && lastSnapshot.global_name !== globalName) {
+            changes.push(`displayName: ${lastSnapshot.global_name} -> ${globalName}`);
+        }
+        if (lastSnapshot.avatar_hash && avatarHash && lastSnapshot.avatar_hash !== avatarHash) {
+            changes.push("avatar changed");
+        }
+        if (lastSnapshot.banner_hash && bannerHash && lastSnapshot.banner_hash !== bannerHash) {
+            changes.push("banner changed");
+        }
+        if (lastSnapshot.bio && bio && lastSnapshot.bio !== bio) {
+            changes.push("bio changed");
+        }
+        if (lastSnapshot.pronouns && pronouns && lastSnapshot.pronouns !== pronouns) {
+            changes.push(`pronouns: ${lastSnapshot.pronouns} -> ${pronouns}`);
+        }
+        if (lastSnapshot.discriminator && discriminator && lastSnapshot.discriminator !== discriminator) {
+            changes.push(`discriminator: ${lastSnapshot.discriminator} -> ${discriminator}`);
+        }
 
         // Only diff connected accounts when this update actually provided them.
         // `undefined` means the caller (GUILD_MEMBERS_CHUNK, basic /users/{id})
@@ -69,6 +92,18 @@ export function handleProfileUpdate(targetId: string, userData: any, profileData
             avatarHash, bannerHash, bio, pronouns, accentColor,
             connectedAccountsJson, mutualGuildsJson
         );
+
+        // During the onboarding bootstrap phase, snapshots are still recorded
+        // but no PROFILE_UPDATE / AVATAR_CHANGE / USERNAME_CHANGE events get
+        // emitted — the first observations of bio/banner/pronouns/etc. arrive
+        // in stages from different fetch paths and any "change" they generate
+        // is an artefact of incomplete data, not a real user action. Once the
+        // first successful profile poll lands, markBootstrapComplete() flips
+        // isBootstrapping(targetId) to false and subsequent runs emit normally.
+        if (isBootstrapping(targetId)) {
+            log.debug(`${targetId}: snapshot stored during bootstrap (events suppressed)`);
+            return;
+        }
 
         if (changes.length > 0) {
             const eventData = JSON.stringify({ changes });

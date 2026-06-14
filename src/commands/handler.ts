@@ -35,6 +35,7 @@ import { getDb } from "../database/connection";
 import { getStmts } from "../database/queries";
 import { startBackfillForTarget } from "../backfill/backfill-engine";
 import { requestPresenceForUser } from "../pollers/status-poller";
+import { bootstrapTargetNow } from "../pollers/target-profile-poller";
 import { getCurrentPresence } from "../collectors/presence";
 import { getCurrentActivities } from "../collectors/activity";
 import { reloadRules } from "../alerts/engine";
@@ -203,10 +204,13 @@ async function cmdAdd(channelId: string, args: string[]): Promise<void> {
 
     getStmts().insertTarget.run(userId, Date.now(), null, null, 0, 1, "UTC");
     refreshTargetCache();
+    // Immediate bootstrap profile fetch so alerts/anomalies become active for
+    // this target within seconds rather than at the next poller cycle.
+    bootstrapTargetNow(userId);
     setTimeout(() => requestPresenceForUser(userId), 5_000);
     if (config.backfillEnabled) startBackfillForTarget(userId).catch(() => {});
 
-    await sendTempMessage(channelId, `✅ Target \`${userId}\` added. Presence subscription in 5 s. (Timezone defaults to UTC — set with \`$tz\`.)`);
+    await sendTempMessage(channelId, `✅ Target \`${userId}\` added. Bootstrap fetch starting now; presence subscription in 5 s. (Timezone defaults to UTC — set with \`$tz\`.)`);
     log.info(`Command: added target ${userId}`);
 }
 

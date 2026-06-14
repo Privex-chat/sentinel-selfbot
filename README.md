@@ -39,6 +39,7 @@ Add a user ID. From that moment, the selfbot records everything it can observe:
 - 🖼️ **Profile changes** — username, display name, avatar, bio, connected accounts (Twitter, Steam, etc.)
 - 🔔 **Platform switches** — detects when a target moves from desktop to mobile mid-session
 - 🌐 **Per-target timezone** — every hour/day-of-week analyser (sleep schedule, routine heatmap, behavioral baselines, `UNUSUAL_HOUR`/`COMES_ONLINE after_hour` alerts) runs in the target's own IANA timezone, not the host server's. Set with `$tz <@user> Area/City`.
+- 🚦 **Clean onboarding pipeline** — newly added targets go through an explicit bootstrap phase (initial profile + presence + activity fetches) during which alerts and anomaly surfacing are suppressed. Operational mode flips on automatically after the first successful profile fetch — no more "joined an hour ago, already showing 3 phantom PROFILE_UPDATE anomalies." Backstop sweep force-completes anything stuck for >30 min.
 - 🖥️ **Self-commands** — manage tracking from any Discord channel with instant trace deletion
 
 **AI-powered intelligence (optional):**

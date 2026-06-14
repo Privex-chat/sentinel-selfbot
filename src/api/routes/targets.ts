@@ -5,7 +5,8 @@ import { config } from "../../utils/config";
 import { isValidTimezone } from "../../utils/timezone";
 import { startBackfillForTarget } from "../../backfill/backfill-engine";
 import { requestPresenceForUser } from "../../pollers/status-poller";
-import { onTargetRemoved, refreshTargetCache } from "../../target-lifecycle";
+import { bootstrapTargetNow } from "../../pollers/target-profile-poller";
+import { onTargetRemoved, refreshTargetCache, markBootstrapComplete } from "../../target-lifecycle";
 
 // How long to wait after adding a target before kicking off the backfill.
 // Adding a target already triggers a profile fetch for mutual guilds — doing
@@ -59,6 +60,14 @@ export function registerTargetRoutes(app: FastifyInstance): void {
         const stmts = getStmts();
         stmts.insertTarget.run(userId, Date.now(), label || null, notes || null, priorityVal, 1, tz);
         refreshTargetCache();
+
+        // Kick off an immediate profile fetch so the target flips from
+        // bootstrap → operational within seconds rather than waiting up to
+        // PROFILE_POLL_INTERVAL_MS (default 5 min) for the next cycle. While
+        // bootstrap is pending, profile/avatar/username events stay suppressed
+        // and the alerts engine + anomaly detector early-return for this
+        // target — see architecture.md "Target onboarding pipeline".
+        bootstrapTargetNow(userId);
 
         if (config.backfillEnabled) {
             // Delay the backfill start so the profile fetch triggered by the
@@ -139,4 +148,32 @@ export function registerTargetRoutes(app: FastifyInstance): void {
 
         return { success: true };
     });
+
+    /**
+     * Operator force-complete for a stuck bootstrap. Idempotent — a target
+     * that's already operational returns 200 with the existing timestamp.
+     * Useful when the immediate post-add profile fetch failed (target has no
+     * mutual guilds and the basic /users endpoint is also failing) and the
+     * operator wants alerts to flow now rather than wait for the 30-min sweep.
+     */
+    app.post<{ Params: { userId: string } }>(
+        "/api/targets/:userId/bootstrap/complete",
+        async (req, reply) => {
+            const { userId } = req.params;
+            const stmts = getStmts();
+            const target = stmts.getTarget.get(userId) as { user_id: string; bootstrap_completed_at: number | null } | undefined;
+            if (!target) {
+                return reply.code(404).send({ error: "Target not found" });
+            }
+
+            const now = Date.now();
+            const flipped = markBootstrapComplete(userId, now);
+            const existing = stmts.getBootstrapCompletedAt.get(userId) as { bootstrap_completed_at: number | null } | undefined;
+            return {
+                success: true,
+                bootstrap_completed_at: existing?.bootstrap_completed_at ?? now,
+                wasAlreadyComplete: !flipped,
+            };
+        }
+    );
 }

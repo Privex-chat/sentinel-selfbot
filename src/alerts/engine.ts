@@ -4,7 +4,7 @@ import { AlertCondition, AlertRule, EVENT_TO_ALERT_MAP, ParsedComposite } from "
 import { config } from "../utils/config";
 import { enqueueWebhook } from "../utils/webhook-queue";
 import { addToDigest } from "./digest";
-import { getTargetTimezone } from "../target-lifecycle";
+import { getTargetTimezone, isBootstrapping } from "../target-lifecycle";
 import { getHourInTz } from "../utils/timezone";
 
 const log = createLogger("AlertEngine");
@@ -142,6 +142,18 @@ export function evaluateEvent(
 ): void {
     const alertTypes = EVENT_TO_ALERT_MAP[eventType];
     if (!alertTypes) return;
+
+    // Targets still in the onboarding bootstrap phase get zero alert evaluation
+    // regardless of rule type. The initial fan-out of profile / presence /
+    // activity / voice events is mostly first-observation artefacts and an
+    // operator who just added a target doesn't want a webhook spam in the
+    // same minute. Once markBootstrapComplete() flips the cache the next
+    // event for this target evaluates normally. See architecture.md
+    // "Target onboarding pipeline".
+    if (isBootstrapping(targetId)) {
+        log.debug(`evaluateEvent: ${eventType} target=${targetId} — suppressed (bootstrapping)`);
+        return;
+    }
 
     log.debug(`evaluateEvent: ${eventType} target=${targetId} rules=${cachedRules.length} digestMode=${config.alertDigestMode}`);
 

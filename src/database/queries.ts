@@ -33,6 +33,24 @@ function prepareStatements() {
         ),
         deleteTarget: db.prepare("DELETE FROM targets WHERE user_id = ?"),
 
+        // ── Bootstrap state (schema v8) ────────────────────────────────────────
+        // Mark a target as operational. Idempotent — already-set rows keep their
+        // original timestamp because of the `IS NULL` guard, so a duplicate
+        // bootstrapTargetNow() call won't reset the operational clock.
+        completeBootstrap: db.prepare(
+            "UPDATE targets SET bootstrap_completed_at = ? WHERE user_id = ? AND bootstrap_completed_at IS NULL"
+        ),
+        // Backstop: force-complete every target that's been stuck in bootstrap
+        // longer than the supplied cutoff. Returns the number of rows updated
+        // via RunResult.changes — the caller logs a warn per sweep.
+        forceCompleteStuckBootstraps: db.prepare(
+            "UPDATE targets SET bootstrap_completed_at = ? WHERE bootstrap_completed_at IS NULL AND added_at < ?"
+        ),
+        // Single-target read used by the API status endpoint + cache rehydrate.
+        getBootstrapCompletedAt: db.prepare(
+            "SELECT bootstrap_completed_at FROM targets WHERE user_id = ?"
+        ),
+
         // ── Events ─────────────────────────────────────────────────────────────
         insertEvent: db.prepare(
             "INSERT INTO events (target_id, event_type, timestamp, data, guild_id, channel_id) VALUES (?, ?, ?, ?, ?, ?)"

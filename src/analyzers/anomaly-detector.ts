@@ -3,7 +3,7 @@ import { getDb } from "../database/connection";
 import { getStmts } from "../database/queries";
 import { analyzeSleepSchedule } from "./sleep-schedule";
 import { computeZScore, isAnomaly } from "./baseline";
-import { getTargetTimezone } from "../target-lifecycle";
+import { getTargetTimezone, isBootstrapping, getBootstrapCompletedAt } from "../target-lifecycle";
 import { getHourInTz } from "../utils/timezone";
 
 const log = createLogger("AnomalyDetector");
@@ -30,12 +30,25 @@ export interface Anomaly {
  * thousands of activity events on the JS heap.
  */
 export function detectAnomalies(targetId: string, days: number = 7): Anomaly[] {
+    // Suppress everything while the target is still onboarding. The first
+    // wave of profile + presence events during bootstrap is mostly artefacts
+    // (incomplete first observations + initial status discovery) and surfacing
+    // those as anomalies is exactly the noise we're trying to eliminate.
+    if (isBootstrapping(targetId)) {
+        return [];
+    }
+
     const db = getDb();
     const tz = getTargetTimezone(targetId);
     const anomalies: Anomaly[] = [];
     const now = Date.now();
-    const since = now - days * 86400000;
-    const baselineSince = now - 30 * 86400000;
+    // Clamp the window's `since` to bootstrap_completed_at so historical events
+    // that landed during onboarding can never resurface as "recent anomalies"
+    // once the target moves into operational mode. Cap baselineSince the same
+    // way for the same reason — pre-bootstrap data isn't a valid baseline.
+    const bootstrapAt = getBootstrapCompletedAt(targetId) ?? 0;
+    const since = Math.max(now - days * 86400000, bootstrapAt);
+    const baselineSince = Math.max(now - 30 * 86400000, bootstrapAt);
     const baselineDayCount = Math.max((since - baselineSince) / 86400000, 1);
 
     // ── 1. Unusual online hours (sleep window) ─────────────────────────────

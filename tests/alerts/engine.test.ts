@@ -307,6 +307,54 @@ describe("evaluateEvent — voice + reaction + profile rules", () => {
     });
 });
 
+describe("evaluateEvent — bootstrap suppression", () => {
+    let fired: CapturedAlert[];
+
+    beforeEach(() => {
+        setupTestDb();
+        insertTestTarget(TARGET, { bootstrap: "pending" });
+        refreshTargetCache();
+        ({ fired } = captureAlerts());
+    });
+    afterEach(teardownTestDb);
+
+    it("COMES_ONLINE does not fire while target is bootstrapping", () => {
+        insertRule("COMES_ONLINE");
+        evaluateEvent("PRESENCE_UPDATE", TARGET, JSON.stringify({
+            oldStatus: "offline", newStatus: "online",
+        }));
+        assert.equal(fired.length, 0, "alert should be suppressed during bootstrap");
+    });
+
+    it("SENDS_MESSAGE does not fire while target is bootstrapping", () => {
+        insertRule("SENDS_MESSAGE");
+        evaluateEvent("MESSAGE_CREATE", TARGET, JSON.stringify({
+            messageId: "1", channelId: "c1", guildId: "g1",
+        }));
+        assert.equal(fired.length, 0);
+    });
+
+    it("alerts fire normally once bootstrap completes", async () => {
+        const { markBootstrapComplete } = await import("../../src/target-lifecycle");
+        insertRule("COMES_ONLINE");
+
+        // Pre-completion → suppressed
+        evaluateEvent("PRESENCE_UPDATE", TARGET, JSON.stringify({
+            oldStatus: "offline", newStatus: "online",
+        }));
+        assert.equal(fired.length, 0);
+
+        // Flip → operational
+        markBootstrapComplete(TARGET);
+
+        // Post-completion → fires
+        evaluateEvent("PRESENCE_UPDATE", TARGET, JSON.stringify({
+            oldStatus: "offline", newStatus: "online",
+        }));
+        assert.equal(fired.length, 1);
+    });
+});
+
 describe("evaluateEvent — rule targeting", () => {
     let fired: CapturedAlert[];
 

@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 export const CREATE_TABLES_SQL = `
 -- Core tables
@@ -9,7 +9,15 @@ CREATE TABLE IF NOT EXISTS targets (
     notes TEXT,
     priority INTEGER DEFAULT 0,
     active INTEGER DEFAULT 1,
-    timezone TEXT NOT NULL DEFAULT 'UTC'
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    -- NULL = target is still in the bootstrap phase (initial profile fetch
+    -- pending). Once the first successful profile poll lands this is set to
+    -- Date.now() and the target moves into operational mode. While NULL:
+    --   • PROFILE_UPDATE / AVATAR_CHANGE / USERNAME_CHANGE events are suppressed
+    --   • evaluateEvent() early-returns for every rule type
+    --   • detectAnomalies() returns an empty array
+    -- See architecture.md "Target onboarding pipeline" for the full state machine.
+    bootstrap_completed_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS events (

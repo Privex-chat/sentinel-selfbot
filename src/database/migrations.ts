@@ -135,6 +135,25 @@ function applyMigration(version: number): void {
             break;
         }
 
+        case 8: {
+            // Per-target onboarding gate.
+            // NULL = bootstrap pending (profile fetch hasn't landed yet); a
+            // timestamp = operational. Existing targets are backfilled to
+            // their `added_at` because they were bootstrapped long ago — they
+            // jump straight into operational mode with no behaviour change.
+            // Fresh targets get NULL via the column default; the immediate
+            // post-`$add` profile fetch (bootstrapTargetNow) flips them once
+            // it succeeds, and a 30-min stuck-bootstrap sweep is the backstop.
+            const db = getDb();
+            try {
+                db.exec("ALTER TABLE targets ADD COLUMN bootstrap_completed_at INTEGER");
+            } catch { /* column may already exist (idempotent re-run) */ }
+            // Backfill: every existing row is operational by definition.
+            db.exec("UPDATE targets SET bootstrap_completed_at = added_at WHERE bootstrap_completed_at IS NULL");
+            log.info("Migration v8: targets.bootstrap_completed_at column added (existing rows backfilled to added_at)");
+            break;
+        }
+
         case 7: {
             // Per-target timezone column. Drives every hour/day-of-week analyser
             // (sleep schedule, routine heatmap, baselines, UNUSUAL_HOUR alert).
